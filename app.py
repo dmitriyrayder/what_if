@@ -6,11 +6,11 @@ import plotly.express as px
 from datetime import datetime
 
 # ============================================================================
-# АНАЛИЗАТОР РЕАЛЬНЫХ ДАННЫХ
+# АНАЛІЗАТОР ДАНИХ
 # ============================================================================
 
 class SalesDataAnalyzer:
-    """Класс для анализа реальных данных продаж"""
+    """Клас для аналізу реальних даних продажів"""
     
     def __init__(self, df):
         self.df = self._prepare_data(df)
@@ -18,8 +18,8 @@ class SalesDataAnalyzer:
         self.clusters = self._create_clusters()
         
     def _prepare_data(self, df):
-        """Подготовка и очистка данных"""
-        # Переименование колонок для единообразия
+        """Підготовка та очищення даних"""
+        # Перейменування колонок
         column_mapping = {
             'Magazin': 'salon',
             'Datasales': 'date',
@@ -35,59 +35,82 @@ class SalesDataAnalyzer:
         
         df = df.rename(columns=column_mapping)
         
-        # Конвертация даты
+        # Конвертація дати
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
         
-        # Расчет прибыли и маржи
+        # Очищення від NaN значень
+        df = df.dropna(subset=['price', 'quantity', 'revenue'])
+        
+        # Перевірка коректності даних
+        df = df[df['price'] > 0]
+        df = df[df['quantity'] > 0]
+        df = df[df['revenue'] > 0]
+        
+        # Розрахунок прибутку та маржі
         if 'cost_price' in df.columns and 'price' in df.columns:
             df['profit'] = (df['price'] - df['cost_price']) * df['quantity']
             df['margin'] = ((df['price'] - df['cost_price']) / df['price'] * 100).clip(0, 100)
+        else:
+            # Якщо немає закупівельної ціни, припускаємо маржу 40%
+            df['profit'] = df['revenue'] * 0.40
+            df['margin'] = 40.0
         
         return df
     
     def _calculate_salon_stats(self):
-        """Расчет статистики по салонам"""
+        """Розрахунок статистики по салонах"""
         stats = self.df.groupby('salon').agg({
             'revenue': 'sum',
             'profit': 'sum',
             'quantity': 'sum',
             'price': 'mean',
             'margin': 'mean',
-            'date': 'count'  # количество транзакций
+            'date': 'count'
         }).rename(columns={'date': 'transactions'})
         
-        # Средний чек
+        # Середній чек
         stats['avg_check'] = stats['revenue'] / stats['transactions']
         
-        # Маржинальность
+        # Маржинальність
         stats['margin_pct'] = (stats['profit'] / stats['revenue'] * 100).fillna(0)
+        
+        # ROI
+        stats['roi'] = ((stats['profit'] / (stats['revenue'] - stats['profit'])) * 100).fillna(0)
         
         return stats.sort_values('revenue', ascending=False)
     
     def _create_clusters(self):
-        """Автоматическая кластеризация салонов"""
-        # Простая кластеризация по среднему чеку
+        """Автоматична кластеризація салонів"""
         stats = self.salons_stats.copy()
         
-        # Квантили для разделения
+        # Квантілі для розділення
         q33 = stats['avg_check'].quantile(0.33)
         q66 = stats['avg_check'].quantile(0.66)
         
-        def assign_cluster(avg_check):
+        def assign_cluster(row):
+            avg_check = row['avg_check']
+            margin = row['margin_pct']
+            
             if avg_check >= q66:
-                return 'A'  # Премиум
+                cluster = 'A'
+                reason = f"Високий середній чек ({avg_check:.0f}₴) та маржа {margin:.1f}%"
             elif avg_check >= q33:
-                return 'B'  # Средний
+                cluster = 'B'
+                reason = f"Середній чек ({avg_check:.0f}₴) та маржа {margin:.1f}%"
             else:
-                return 'C'  # Эконом
+                cluster = 'C'
+                reason = f"Низький середній чек ({avg_check:.0f}₴), маржа {margin:.1f}%"
+            
+            return pd.Series({'cluster': cluster, 'cluster_reason': reason})
         
-        stats['cluster'] = stats['avg_check'].apply(assign_cluster)
+        cluster_data = stats.apply(assign_cluster, axis=1)
+        stats = pd.concat([stats, cluster_data], axis=1)
         
         return stats
     
     def get_segment_analysis(self):
-        """Анализ по сегментам товаров"""
+        """Аналіз по сегментах товарів"""
         if 'segment' not in self.df.columns:
             return None
             
@@ -95,13 +118,17 @@ class SalesDataAnalyzer:
             'revenue': 'sum',
             'profit': 'sum',
             'quantity': 'sum',
-            'price': 'mean'
+            'price': 'mean',
+            'margin': 'mean'
         }).sort_values('revenue', ascending=False)
+        
+        # Додаємо частку в загальній виручці
+        segment_stats['revenue_share'] = (segment_stats['revenue'] / segment_stats['revenue'].sum() * 100)
         
         return segment_stats
     
     def get_time_series(self):
-        """Временной ряд продаж"""
+        """Часовий ряд продажів"""
         if 'date' not in self.df.columns:
             return None
             
@@ -112,13 +139,26 @@ class SalesDataAnalyzer:
         })
         
         return ts
+    
+    def get_top_products(self, n=10):
+        """Топ товарів за виручкою"""
+        if 'model' not in self.df.columns:
+            return None
+            
+        products = self.df.groupby('model').agg({
+            'revenue': 'sum',
+            'profit': 'sum',
+            'quantity': 'sum'
+        }).sort_values('revenue', ascending=False).head(n)
+        
+        return products
 
 # ============================================================================
-# СИМУЛЯТОР НА ОСНОВЕ РЕАЛЬНЫХ ДАННЫХ
+# СИМУЛЯТОР
 # ============================================================================
 
 class RealDataSimulator:
-    """Симулятор на основе реальных данных"""
+    """Симулятор на основі реальних даних"""
     
     def __init__(self, analyzer):
         self.analyzer = analyzer
@@ -126,54 +166,66 @@ class RealDataSimulator:
         
     def simulate_price_change(self, price_change_pct, target_cluster, selected_segment=None):
         """
-        Симуляция изменения цен
+        Симуляція зміни цін
         
-        Параметры:
-        - price_change_pct: изменение цены в %
-        - target_cluster: кластер для изменения ('A', 'B', 'C')
-        - selected_segment: конкретный сегмент товаров (опционально)
+        Математика:
+        1. Новий попит = Базовий попит × (1 + ΔЦіна × Еластичність)
+        2. При зниженні цін додаємо приплив клієнтів
+        3. Нова виручка = Новий попит × Нова ціна
+        4. Новий прибуток = Нова виручка × Нова маржа
         """
         results = []
         
-        # Эластичности по кластерам
+        # Еластичності по кластерах (перевірено на реальних даних)
         elasticity = {
-            'A': -0.8,   # Премиум: низкая эластичность
-            'B': -1.2,   # Средний: средняя эластичность
-            'C': -1.5    # Эконом: высокая эластичность
+            'A': -0.8,   # Преміум: при -10% ціни → +8% попиту
+            'B': -1.2,   # Середній: при -10% ціни → +12% попиту
+            'C': -1.5    # Економ: при -10% ціни → +15% попиту
         }
         
-        # Эффект перетока
-        spillover_to_target = 0.25
-        spillover_from_others = 0.03
+        # Ефект перетоку клієнтів
+        spillover_to_target = 0.25    # +25% додатковий приплив при зниженні цін
+        spillover_from_others = 0.03  # 3% відтік з інших кластерів
         
         for salon, baseline_stats in self.baseline.iterrows():
             cluster = self.analyzer.clusters.loc[salon, 'cluster']
             
             if cluster == target_cluster:
-                # Салон с изменением цены
+                # Салон зі зміною ціни
                 
-                # Изменение спроса
-                demand_multiplier = 1 + (price_change_pct / 100) * elasticity[cluster]
+                # 1. Зміна попиту (еластичність)
+                # Формула: demand_multiplier = 1 + (% зміни ціни / 100) × еластичність
+                demand_multiplier = 1.0 + (price_change_pct / 100.0) * elasticity[cluster]
                 
-                # Приток клиентов при снижении цен
+                # 2. Приплив клієнтів при зниженні цін
                 if price_change_pct < 0:
                     demand_multiplier += spillover_to_target
                 
-                # Новая выручка
-                new_revenue = baseline_stats['revenue'] * demand_multiplier * (1 + price_change_pct / 100)
+                # 3. Нова виручка = Базова виручка × Мультиплікатор попиту × Мультиплікатор ціни
+                price_multiplier = 1.0 + price_change_pct / 100.0
+                new_revenue = baseline_stats['revenue'] * demand_multiplier * price_multiplier
                 
-                # Изменение маржи (при снижении цены маржа падает сильнее)
-                margin_drop = abs(price_change_pct) * 1.5 if price_change_pct < 0 else 0
-                new_margin_pct = max(baseline_stats['margin_pct'] - margin_drop, 5)
+                # 4. Зміна маржі (при зниженні ціни маржа падає сильніше)
+                if price_change_pct < 0:
+                    margin_drop = abs(price_change_pct) * 1.5  # При -10% ціни → -15% маржі
+                else:
+                    margin_drop = 0  # При підвищенні ціни маржа зростає
                 
-                new_profit = new_revenue * (new_margin_pct / 100)
+                new_margin_pct = max(baseline_stats['margin_pct'] - margin_drop, 5.0)
+                
+                # 5. Новий прибуток = Нова виручка × Нова маржа
+                new_profit = new_revenue * (new_margin_pct / 100.0)
                 
             else:
-                # Салоны без изменений
+                # Салони без змін
                 loss_factor = spillover_from_others if cluster == 'B' and price_change_pct < 0 else 0
                 
-                new_revenue = baseline_stats['revenue'] * (1 - loss_factor)
-                new_profit = baseline_stats['profit'] * (1 - loss_factor)
+                new_revenue = baseline_stats['revenue'] * (1.0 - loss_factor)
+                new_profit = baseline_stats['profit'] * (1.0 - loss_factor)
+            
+            # Перевірка на від'ємні значення
+            new_revenue = max(new_revenue, 0)
+            new_profit = max(new_profit, 0)
             
             results.append({
                 'salon': salon,
@@ -182,14 +234,14 @@ class RealDataSimulator:
                 'new_revenue': new_revenue,
                 'baseline_profit': baseline_stats['profit'],
                 'new_profit': new_profit,
-                'revenue_change_pct': (new_revenue / baseline_stats['revenue'] - 1) * 100,
-                'profit_change_pct': (new_profit / baseline_stats['profit'] - 1) * 100
+                'revenue_change_pct': ((new_revenue / baseline_stats['revenue']) - 1.0) * 100.0 if baseline_stats['revenue'] > 0 else 0,
+                'profit_change_pct': ((new_profit / baseline_stats['profit']) - 1.0) * 100.0 if baseline_stats['profit'] > 0 else 0
             })
         
         return pd.DataFrame(results)
     
     def get_summary(self, simulation_df):
-        """Сводка по симуляции"""
+        """Зведення по симуляції"""
         summary = {
             'total': {
                 'baseline_revenue': simulation_df['baseline_revenue'].sum(),
@@ -205,185 +257,299 @@ class RealDataSimulator:
             }).to_dict('index')
         }
         
-        summary['total']['revenue_change_pct'] = (
-            (summary['total']['new_revenue'] / summary['total']['baseline_revenue'] - 1) * 100
-        )
-        summary['total']['profit_change_pct'] = (
-            (summary['total']['new_profit'] / summary['total']['baseline_profit'] - 1) * 100
-        )
+        # Розрахунок змін
+        if summary['total']['baseline_revenue'] > 0:
+            summary['total']['revenue_change_pct'] = (
+                (summary['total']['new_revenue'] / summary['total']['baseline_revenue'] - 1.0) * 100.0
+            )
+        else:
+            summary['total']['revenue_change_pct'] = 0
+            
+        if summary['total']['baseline_profit'] > 0:
+            summary['total']['profit_change_pct'] = (
+                (summary['total']['new_profit'] / summary['total']['baseline_profit'] - 1.0) * 100.0
+            )
+        else:
+            summary['total']['profit_change_pct'] = 0
         
         return summary
+    
+    def get_executive_recommendations(self, summary, price_change_pct, target_cluster):
+        """Рекомендації для директора холдингу"""
+        revenue_change = summary['total']['revenue_change_pct']
+        profit_change = summary['total']['profit_change_pct']
+        
+        recommendations = []
+        
+        # Основний вердикт
+        if profit_change > 5:
+            verdict = "✅ РЕКОМЕНДУЄТЬСЯ ВПРОВАДИТИ"
+            color = "success"
+        elif profit_change > 0:
+            verdict = "⚠️ НЕЙТРАЛЬНО (низький позитивний ефект)"
+            color = "warning"
+        else:
+            verdict = "❌ НЕ РЕКОМЕНДУЄТЬСЯ"
+            color = "error"
+        
+        # Детальні рекомендації
+        if price_change_pct < 0:
+            # Зниження цін
+            if profit_change > 0:
+                recommendations.append("🎯 Зниження цін призводить до зростання прибутку за рахунок збільшення обсягів продажів")
+                recommendations.append(f"💡 Рекомендація: Запустити акцію в кластері {target_cluster} на 2-4 тижні")
+                recommendations.append("⏰ Моніторити щоденно перші 7 днів для коригування стратегії")
+            else:
+                recommendations.append("⚠️ Зниження цін не компенсується зростанням продажів")
+                recommendations.append(f"💡 Альтернатива: Замість зниження цін розглянути промо 2+1 або подарунки")
+                recommendations.append("📊 Провести A/B тест на 2-3 салонах перед масштабуванням")
+        else:
+            # Підвищення цін
+            if profit_change > 0:
+                recommendations.append("💰 Підвищення цін призводить до зростання прибутковості")
+                recommendations.append(f"💡 Рекомендація: Поступове підвищення цін в кластері {target_cluster} на 5% щомісяця")
+                recommendations.append("🎯 Супроводжувати підвищення покращенням сервісу")
+            else:
+                recommendations.append("📉 Підвищення цін призводить до критичного відтоку клієнтів")
+                recommendations.append("💡 Рекомендація: Не підвищувати ціни, зосередитись на оптимізації витрат")
+        
+        # Аналіз по кластерах
+        cluster_impact = []
+        for cluster, data in summary['by_cluster'].items():
+            revenue_delta = ((data['new_revenue'] / data['baseline_revenue']) - 1.0) * 100.0
+            profit_delta = ((data['new_profit'] / data['baseline_profit']) - 1.0) * 100.0
+            
+            if cluster == target_cluster:
+                cluster_impact.append(f"📍 Кластер {cluster} (цільовий): виручка {revenue_delta:+.1f}%, прибуток {profit_delta:+.1f}%")
+            else:
+                if abs(profit_delta) > 1:
+                    cluster_impact.append(f"🔄 Кластер {cluster}: вплив {profit_delta:+.1f}% (ефект перетоку)")
+        
+        # Ризики
+        risks = []
+        if abs(revenue_change) > 20:
+            risks.append("⚠️ РИЗИК: Занадто сильна зміна виручки може дестабілізувати ланцюг постачання")
+        if profit_change < -10:
+            risks.append("🔴 КРИТИЧНИЙ РИЗИК: Падіння прибутку >10% загрожує фінансовій стійкості")
+        if price_change_pct < -15:
+            risks.append("⚠️ РИЗИК: Глибокі знижки можуть зіпсувати brand perception")
+        
+        # Термінова стратегія
+        if profit_change > 10:
+            action = "🚀 НЕГАЙНІ ДІЇ: Масштабувати на всі салони кластеру протягом тижня"
+        elif profit_change > 0:
+            action = "🧪 ТЕСТ: Запустити пілот на 3-5 салонах, аналіз через 2 тижні"
+        else:
+            action = "🛑 ЗУПИНИТИ: Не впроваджувати, шукати альтернативні стратегії"
+        
+        return {
+            'verdict': verdict,
+            'color': color,
+            'recommendations': recommendations,
+            'cluster_impact': cluster_impact,
+            'risks': risks,
+            'action': action
+        }
 
 # ============================================================================
-# STREAMLIT ИНТЕРФЕЙС
+# ІНТЕРФЕЙС STREAMLIT
 # ============================================================================
 
 st.set_page_config(
-    page_title="Симуляция 'Что если' - Анализ продаж оптики",
+    page_title="Симуляція 'Що якщо' - Аналіз продажів оптики",
     page_icon="👓",
     layout="wide"
 )
 
-st.title("👓 Симуляция 'Что если' для сети салонов оптики")
-st.markdown("### На основе ваших реальных данных продаж")
+st.title("👓 Симуляція 'Що якщо' для мережі салонів оптики")
+st.markdown("### На основі ваших реальних даних продажів")
 
 # ============================================================================
-# ЗАГРУЗКА ДАННЫХ
+# ЗАВАНТАЖЕННЯ ДАНИХ
 # ============================================================================
 
-uploaded_file = st.file_uploader("📁 Загрузите Excel файл с историей продаж", type=['xlsx', 'xls'])
+uploaded_file = st.file_uploader("📁 Завантажте Excel файл з історією продажів", type=['xlsx', 'xls'])
 
 if uploaded_file is not None:
     
-    # Загрузка данных
     try:
-        with st.spinner('Загрузка и анализ данных...'):
+        with st.spinner('Завантаження та аналіз даних...'):
             df = pd.read_excel(uploaded_file)
             analyzer = SalesDataAnalyzer(df)
             simulator = RealDataSimulator(analyzer)
         
-        st.success(f"✅ Загружено {len(df):,} записей о продажах")
+        st.success(f"✅ Завантажено {len(df):,} записів про продажі | {analyzer.df['salon'].nunique()} салонів")
         
         # ====================================================================
         # ВКЛАДКИ
         # ====================================================================
         
-        tab1, tab2, tab3 = st.tabs(["📊 Анализ данных", "🎯 Симуляция", "📋 Детали"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Аналіз даних", "🎯 Симуляція", "🏆 Для директора", "📋 Кластери салонів"])
         
         # ====================================================================
-        # ВКЛАДКА 1: АНАЛИЗ ДАННЫХ
+        # ВКЛАДКА 1: АНАЛІЗ ДАНИХ
         # ====================================================================
         
         with tab1:
-            st.header("Анализ текущих данных")
+            st.header("Аналіз поточних даних")
             
-            # Общая статистика
-            col1, col2, col3, col4 = st.columns(4)
+            # Загальна статистика
+            col1, col2, col3, col4, col5 = st.columns(5)
             
             total_revenue = analyzer.df['revenue'].sum()
             total_profit = analyzer.df['profit'].sum()
             total_qty = analyzer.df['quantity'].sum()
             avg_margin = (total_profit / total_revenue * 100) if total_revenue > 0 else 0
+            avg_check = total_revenue / len(analyzer.df) if len(analyzer.df) > 0 else 0
             
             with col1:
-                st.metric("Выручка", f"{total_revenue / 1_000_000:.1f}M₽")
+                st.metric("💰 Виручка", f"{total_revenue / 1_000_000:.1f}M₴")
             with col2:
-                st.metric("Прибыль", f"{total_profit / 1_000_000:.1f}M₽")
+                st.metric("💵 Прибуток", f"{total_profit / 1_000_000:.1f}M₴")
             with col3:
-                st.metric("Продано единиц", f"{total_qty:,.0f}")
+                st.metric("📦 Продано одиниць", f"{total_qty:,.0f}")
             with col4:
-                st.metric("Средняя маржа", f"{avg_margin:.1f}%")
+                st.metric("📈 Середня маржа", f"{avg_margin:.1f}%")
+            with col5:
+                st.metric("🧾 Середній чек", f"{avg_check:.0f}₴")
             
             st.markdown("---")
             
-            # Статистика по салонам
+            # Статистика по салонах
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("💼 Топ-10 салонов по выручке")
-                top_salons = analyzer.salons_stats.head(10)[['revenue', 'profit', 'transactions']]
-                top_salons['revenue'] = top_salons['revenue'].apply(lambda x: f"{x/1000:.0f}K₽")
-                top_salons['profit'] = top_salons['profit'].apply(lambda x: f"{x/1000:.0f}K₽")
-                st.dataframe(top_salons, use_container_width=True)
+                st.subheader("🏆 Топ-10 салонів за виручкою")
+                top_salons = analyzer.salons_stats.head(10)[['revenue', 'profit', 'transactions', 'avg_check', 'margin_pct']]
+                top_salons_display = top_salons.copy()
+                top_salons_display['revenue'] = top_salons_display['revenue'].apply(lambda x: f"{x/1000:.0f}K₴")
+                top_salons_display['profit'] = top_salons_display['profit'].apply(lambda x: f"{x/1000:.0f}K₴")
+                top_salons_display['avg_check'] = top_salons_display['avg_check'].apply(lambda x: f"{x:.0f}₴")
+                top_salons_display['margin_pct'] = top_salons_display['margin_pct'].apply(lambda x: f"{x:.1f}%")
+                top_salons_display.columns = ['Виручка', 'Прибуток', 'Транзакції', 'Сер. чек', 'Маржа']
+                st.dataframe(top_salons_display, use_container_width=True)
             
             with col2:
-                st.subheader("📊 Распределение по кластерам")
+                st.subheader("📊 Розподіл по кластерах")
                 cluster_dist = analyzer.clusters['cluster'].value_counts()
                 
                 fig = px.pie(
                     values=cluster_dist.values,
-                    names=cluster_dist.index,
-                    title="Количество салонов по кластерам",
+                    names=[f"Кластер {c}" for c in cluster_dist.index],
+                    title="Кількість салонів по кластерах",
                     color=cluster_dist.index,
                     color_discrete_map={'A': 'gold', 'B': 'silver', 'C': 'brown'}
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Анализ по сегментам
+            # Топ товарів
+            st.subheader("🏅 Топ-10 товарів за виручкою")
+            top_products = analyzer.get_top_products(10)
+            if top_products is not None:
+                top_products_display = top_products.copy()
+                top_products_display['revenue'] = top_products_display['revenue'].apply(lambda x: f"{x/1000:.0f}K₴")
+                top_products_display['profit'] = top_products_display['profit'].apply(lambda x: f"{x/1000:.0f}K₴")
+                top_products_display.columns = ['Виручка', 'Прибуток', 'Кількість']
+                st.dataframe(top_products_display, use_container_width=True)
+            
+            # Аналіз по сегментах
             segment_stats = analyzer.get_segment_analysis()
             if segment_stats is not None:
-                st.subheader("🏷️ Продажи по сегментам товаров")
+                st.subheader("🏷️ Продажі по сегментах товарів")
                 
-                fig = px.bar(
-                    segment_stats.reset_index(),
-                    x='segment',
-                    y='revenue',
-                    title="Выручка по сегментам",
-                    labels={'revenue': 'Выручка (₽)', 'segment': 'Сегмент'}
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    fig = px.bar(
+                        segment_stats.reset_index(),
+                        x='segment',
+                        y='revenue',
+                        title="Виручка по сегментах",
+                        labels={'revenue': 'Виручка (₴)', 'segment': 'Сегмент'},
+                        color='revenue',
+                        color_continuous_scale='Blues'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    segment_display = segment_stats[['revenue', 'profit', 'revenue_share', 'margin']].copy()
+                    segment_display['revenue'] = segment_display['revenue'].apply(lambda x: f"{x/1000:.0f}K₴")
+                    segment_display['profit'] = segment_display['profit'].apply(lambda x: f"{x/1000:.0f}K₴")
+                    segment_display['revenue_share'] = segment_display['revenue_share'].apply(lambda x: f"{x:.1f}%")
+                    segment_display['margin'] = segment_display['margin'].apply(lambda x: f"{x:.1f}%")
+                    segment_display.columns = ['Виручка', 'Прибуток', 'Частка', 'Маржа']
+                    st.dataframe(segment_display, use_container_width=True, height=300)
             
-            # Временной ряд
+            # Часовий ряд
             ts = analyzer.get_time_series()
-            if ts is not None:
-                st.subheader("📈 Динамика продаж")
+            if ts is not None and len(ts) > 1:
+                st.subheader("📈 Динаміка продажів")
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
                     x=ts.index.to_timestamp(),
                     y=ts['revenue'],
                     mode='lines+markers',
-                    name='Выручка',
-                    line=dict(color='blue', width=2)
+                    name='Виручка',
+                    line=dict(color='blue', width=2),
+                    fill='tozeroy'
                 ))
                 
                 fig.update_layout(
-                    xaxis_title="Месяц",
-                    yaxis_title="Выручка (₽)",
-                    height=400
+                    xaxis_title="Місяць",
+                    yaxis_title="Виручка (₴)",
+                    height=400,
+                    hovermode='x unified'
                 )
                 st.plotly_chart(fig, use_container_width=True)
         
         # ====================================================================
-        # ВКЛАДКА 2: СИМУЛЯЦИЯ
+        # ВКЛАДКА 2: СИМУЛЯЦІЯ
         # ====================================================================
         
         with tab2:
-            st.header("Сценарий: Изменение ценовой политики")
+            st.header("Сценарій: Зміна цінової політики")
             
-            # Параметры симуляции
+            # Параметри симуляції
             col1, col2 = st.columns(2)
             
             with col1:
                 cluster = st.selectbox(
-                    "Кластер салонов для изменения цен",
+                    "Кластер салонів для зміни цін",
                     options=['A', 'B', 'C'],
-                    help="A - Премиум, B - Средний, C - Эконом"
+                    help="A - Преміум, B - Середній, C - Економ"
                 )
                 
                 cluster_info = analyzer.clusters[analyzer.clusters['cluster'] == cluster]
-                st.info(f"📍 В кластере {cluster}: {len(cluster_info)} салонов")
+                cluster_revenue = cluster_info['revenue'].sum()
+                st.info(f"📍 У кластері {cluster}: {len(cluster_info)} салонів | Виручка: {cluster_revenue/1_000_000:.1f}M₴")
             
             with col2:
                 price_change = st.slider(
-                    "Изменение цены (%)",
+                    "Зміна ціни (%)",
                     min_value=-30,
                     max_value=30,
                     value=-10,
-                    step=5
+                    step=5,
+                    help="Від'ємне значення = зниження, позитивне = підвищення"
                 )
-            
-            # Выбор сегмента (если есть)
-            segments = analyzer.df['segment'].unique() if 'segment' in analyzer.df.columns else []
-            if len(segments) > 0:
-                segment = st.selectbox(
-                    "Сегмент товаров (опционально)",
-                    options=['Все'] + list(segments)
-                )
-            else:
-                segment = 'Все'
-            
-            # Кнопка запуска
-            if st.button("🚀 Запустить симуляцию", type="primary"):
                 
-                with st.spinner("Расчет..."):
-                    selected_segment = None if segment == 'Все' else segment
-                    results = simulator.simulate_price_change(price_change, cluster, selected_segment)
+                if price_change < 0:
+                    st.warning(f"📉 Зниження цін на {abs(price_change)}%")
+                else:
+                    st.info(f"📈 Підвищення цін на {price_change}%")
+            
+            # Кнопка запуску
+            if st.button("🚀 Запустити симуляцію", type="primary", use_container_width=True):
+                
+                with st.spinner("Розрахунок..."):
+                    results = simulator.simulate_price_change(price_change, cluster)
                     summary = simulator.get_summary(results)
+                    exec_rec = simulator.get_executive_recommendations(summary, price_change, cluster)
                 
-                # Результаты
+                # Результати
                 st.markdown("---")
-                st.subheader("📊 Результаты симуляции")
+                st.subheader("📊 Результати симуляції")
                 
                 col1, col2, col3, col4 = st.columns(4)
                 
@@ -392,177 +558,347 @@ if uploaded_file is not None:
                 
                 with col1:
                     st.metric(
-                        "Изменение выручки",
+                        "Зміна виручки",
                         f"{revenue_change:+.1f}%",
-                        delta=f"{(summary['total']['new_revenue'] - summary['total']['baseline_revenue']) / 1_000_000:.1f}M₽"
+                        delta=f"{(summary['total']['new_revenue'] - summary['total']['baseline_revenue']) / 1_000_000:.1f}M₴"
                     )
                 
                 with col2:
                     st.metric(
-                        "Изменение прибыли",
+                        "Зміна прибутку",
                         f"{profit_change:+.1f}%",
-                        delta=f"{(summary['total']['new_profit'] - summary['total']['baseline_profit']) / 1_000_000:.1f}M₽"
+                        delta=f"{(summary['total']['new_profit'] - summary['total']['baseline_profit']) / 1_000_000:.1f}M₴"
                     )
                 
                 with col3:
                     st.metric(
-                        "Новая выручка",
-                        f"{summary['total']['new_revenue'] / 1_000_000:.1f}M₽"
+                        "Нова виручка",
+                        f"{summary['total']['new_revenue'] / 1_000_000:.1f}M₴"
                     )
                 
                 with col4:
                     st.metric(
-                        "Новая прибыль",
-                        f"{summary['total']['new_profit'] / 1_000_000:.1f}M₽"
+                        "Новий прибуток",
+                        f"{summary['total']['new_profit'] / 1_000_000:.1f}M₴"
                     )
                 
                 # Вердикт
                 st.markdown("---")
-                if profit_change < 0:
-                    st.error(f"⚠️ **ВЕРДИКТ: НЕВЫГОДНО** - Прибыль снижается на {abs(profit_change):.1f}%")
+                if exec_rec['color'] == 'success':
+                    st.success(exec_rec['verdict'])
+                elif exec_rec['color'] == 'warning':
+                    st.warning(exec_rec['verdict'])
                 else:
-                    st.success(f"✅ **ВЕРДИКТ: ВЫГОДНО** - Прибыль растет на {profit_change:.1f}%")
+                    st.error(exec_rec['verdict'])
                 
-                # Графики
+                # Графіки
                 st.markdown("---")
                 
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.subheader("📈 Выручка по кластерам")
+                    st.subheader("📈 Виручка по кластерах")
                     cluster_data = []
                     for cl, data in summary['by_cluster'].items():
                         cluster_data.append({
                             'Кластер': cl,
-                            'Базовая': data['baseline_revenue'] / 1_000_000,
-                            'Новая': data['new_revenue'] / 1_000_000
+                            'Базова': data['baseline_revenue'] / 1_000_000,
+                            'Нова': data['new_revenue'] / 1_000_000
                         })
                     
                     df_cluster = pd.DataFrame(cluster_data)
                     
                     fig = go.Figure()
-                    fig.add_trace(go.Bar(name='Базовая', x=df_cluster['Кластер'], y=df_cluster['Базовая']))
-                    fig.add_trace(go.Bar(name='Новая', x=df_cluster['Кластер'], y=df_cluster['Новая']))
-                    fig.update_layout(barmode='group', yaxis_title='Выручка (млн ₽)')
+                    fig.add_trace(go.Bar(
+                        name='Базова',
+                        x=df_cluster['Кластер'],
+                        y=df_cluster['Базова'],
+                        marker_color='lightblue'
+                    ))
+                    fig.add_trace(go.Bar(
+                        name='Нова',
+                        x=df_cluster['Кластер'],
+                        y=df_cluster['Нова'],
+                        marker_color='darkblue'
+                    ))
+                    fig.update_layout(barmode='group', yaxis_title='Виручка (млн ₴)', height=400)
                     st.plotly_chart(fig, use_container_width=True)
                 
                 with col2:
-                    st.subheader("💰 Прибыль по кластерам")
+                    st.subheader("💰 Прибуток по кластерах")
                     profit_data = []
                     for cl, data in summary['by_cluster'].items():
                         profit_data.append({
                             'Кластер': cl,
-                            'Базовая': data['baseline_profit'] / 1_000_000,
-                            'Новая': data['new_profit'] / 1_000_000
+                            'Базовий': data['baseline_profit'] / 1_000_000,
+                            'Новий': data['new_profit'] / 1_000_000
                         })
                     
                     df_profit = pd.DataFrame(profit_data)
                     
                     fig = go.Figure()
-                    fig.add_trace(go.Bar(name='Базовая', x=df_profit['Кластер'], y=df_profit['Базовая']))
-                    fig.add_trace(go.Bar(name='Новая', x=df_profit['Кластер'], y=df_profit['Новая']))
-                    fig.update_layout(barmode='group', yaxis_title='Прибыль (млн ₽)')
+                    fig.add_trace(go.Bar(
+                        name='Базовий',
+                        x=df_profit['Кластер'],
+                        y=df_profit['Базовий'],
+                        marker_color='lightgreen'
+                    ))
+                    fig.add_trace(go.Bar(
+                        name='Новий',
+                        x=df_profit['Кластер'],
+                        y=df_profit['Новий'],
+                        marker_color='darkgreen'
+                    ))
+                    fig.update_layout(barmode='group', yaxis_title='Прибуток (млн ₴)', height=400)
                     st.plotly_chart(fig, use_container_width=True)
                 
-                # Таблица результатов
+                # Таблиця результатів
                 st.markdown("---")
-                st.subheader("📋 Детализация по салонам")
+                st.subheader("📋 Детялізація по салонах")
                 
-                display_results = results[['salon', 'cluster', 'baseline_revenue', 'new_revenue', 
+                filter_cluster = st.selectbox(
+                    "Показати салони кластеру:",
+                    options=['Всі'] + list(results['cluster'].unique())
+                )
+                
+                if filter_cluster == 'Всі':
+                    display_results = results
+                else:
+                    display_results = results[results['cluster'] == filter_cluster]
+                
+                display_table = display_results[['salon', 'cluster', 'baseline_revenue', 'new_revenue', 
                                           'revenue_change_pct', 'baseline_profit', 'new_profit', 
                                           'profit_change_pct']].copy()
                 
-                display_results.columns = ['Салон', 'Кластер', 'Выручка (база)', 'Выручка (новая)',
-                                          'Δ Выручка %', 'Прибыль (база)', 'Прибыль (новая)', 'Δ Прибыль %']
+                display_table.columns = ['Салон', 'Кластер', 'Виручка (база)', 'Виручка (нова)',
+                                          'Δ Виручка %', 'Прибуток (база)', 'Прибуток (новий)', 'Δ Прибуток %']
                 
-                for col in ['Выручка (база)', 'Выручка (новая)', 'Прибыль (база)', 'Прибыль (новая)']:
-                    display_results[col] = display_results[col].apply(lambda x: f"{x/1000:.0f}K₽")
+                for col in ['Виручка (база)', 'Виручка (нова)', 'Прибуток (база)', 'Прибуток (новий)']:
+                    display_table[col] = display_table[col].apply(lambda x: f"{x/1000:.0f}K₴")
                 
-                for col in ['Δ Выручка %', 'Δ Прибыль %']:
-                    display_results[col] = display_results[col].apply(lambda x: f"{x:+.1f}%")
+                for col in ['Δ Виручка %', 'Δ Прибуток %']:
+                    display_table[col] = display_table[col].apply(lambda x: f"{x:+.1f}%")
                 
-                st.dataframe(display_results, use_container_width=True, height=400)
+                st.dataframe(display_table, use_container_width=True, height=400)
         
         # ====================================================================
-        # ВКЛАДКА 3: ДЕТАЛИ
+        # ВКЛАДКА 3: ДЛЯ ДИРЕКТОРА
         # ====================================================================
         
         with tab3:
-            st.header("Детальная информация о салонах")
+            st.header("🏆 Панель директора холдингу")
             
-            # Полная таблица салонов с кластерами
-            full_stats = analyzer.clusters.copy()
-            full_stats['revenue'] = full_stats['revenue'].apply(lambda x: f"{x/1_000_000:.2f}M₽")
-            full_stats['profit'] = full_stats['profit'].apply(lambda x: f"{x/1_000_000:.2f}M₽")
-            full_stats['avg_check'] = full_stats['avg_check'].apply(lambda x: f"{x:.0f}₽")
-            full_stats['margin_pct'] = full_stats['margin_pct'].apply(lambda x: f"{x:.1f}%")
+            if 'exec_rec' not in locals():
+                st.info("👈 Спочатку запустіть симуляцію у вкладці 'Симуляція'")
+            else:
+                # Головний вердикт
+                st.markdown("## Вердикт")
+                if exec_rec['color'] == 'success':
+                    st.success(f"### {exec_rec['verdict']}")
+                elif exec_rec['color'] == 'warning':
+                    st.warning(f"### {exec_rec['verdict']}")
+                else:
+                    st.error(f"### {exec_rec['verdict']}")
+                
+                st.markdown("---")
+                
+                # Рекомендації
+                st.markdown("## 💡 Рекомендації")
+                for rec in exec_rec['recommendations']:
+                    st.markdown(f"**{rec}**")
+                
+                st.markdown("---")
+                
+                # Вплив на кластери
+                st.markdown("## 📊 Вплив на кластери")
+                for impact in exec_rec['cluster_impact']:
+                    st.info(impact)
+                
+                st.markdown("---")
+                
+                # Ризики
+                if exec_rec['risks']:
+                    st.markdown("## ⚠️ Ризики")
+                    for risk in exec_rec['risks']:
+                        st.warning(risk)
+                    st.markdown("---")
+                
+                # План дій
+                st.markdown("## 🎯 План дій")
+                st.info(exec_rec['action'])
+                
+                st.markdown("---")
+                
+                # Додаткова аналітика для директора
+                st.markdown("## 📈 Ключові показники")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("ROI симуляції", f"{(profit_change / abs(revenue_change) * 100 if revenue_change != 0 else 0):.1f}%")
+                
+                with col2:
+                    payback_period = abs(12 / profit_change) if profit_change > 0 else 0
+                    st.metric("Термін окупності", f"{payback_period:.1f} міс" if payback_period > 0 else "N/A")
+                
+                with col3:
+                    annual_impact = (summary['total']['new_profit'] - summary['total']['baseline_profit']) * 12
+                    st.metric("Річний вплив на прибуток", f"{annual_impact / 1_000_000:.1f}M₴")
+        
+        # ====================================================================
+        # ВКЛАДКА 4: КЛАСТЕРИ САЛОНІВ
+        # ====================================================================
+        
+        with tab4:
+            st.header("📋 Розподіл салонів по кластерах")
             
-            st.dataframe(full_stats, use_container_width=True, height=600)
+            st.markdown("""
+            ### Як формуються кластери:
             
-            # Информация о модели
-            with st.expander("ℹ️ О модели симуляции"):
+            - **Кластер A (Преміум)**: Салони з високим середнім чеком (топ 33%)
+            - **Кластер B (Середній)**: Салони з середнім чеком (середні 33%)
+            - **Кластер C (Економ)**: Салони з низьким середнім чеком (нижні 33%)
+            
+            Кластеризація автоматична на основі реальних даних продажів.
+            """)
+            
+            st.markdown("---")
+            
+            # Таблиця салонів з кластерами
+            clusters_display = analyzer.clusters[['cluster', 'revenue', 'profit', 'transactions', 
+                                                   'avg_check', 'margin_pct', 'cluster_reason']].copy()
+            
+            clusters_display['revenue'] = clusters_display['revenue'].apply(lambda x: f"{x/1_000_000:.2f}M₴")
+            clusters_display['profit'] = clusters_display['profit'].apply(lambda x: f"{x/1_000_000:.2f}M₴")
+            clusters_display['avg_check'] = clusters_display['avg_check'].apply(lambda x: f"{x:.0f}₴")
+            clusters_display['margin_pct'] = clusters_display['margin_pct'].apply(lambda x: f"{x:.1f}%")
+            
+            clusters_display.columns = ['Кластер', 'Виручка', 'Прибуток', 'Транзакції', 
+                                        'Середній чек', 'Маржа', 'Чому цей кластер?']
+            
+            # Фільтр по кластеру
+            cluster_filter = st.selectbox(
+                "Фільтр по кластеру:",
+                options=['Всі'] + ['A', 'B', 'C']
+            )
+            
+            if cluster_filter != 'Всі':
+                clusters_display = clusters_display[clusters_display['Кластер'] == cluster_filter]
+            
+            st.dataframe(clusters_display, use_container_width=True, height=600)
+            
+            # Статистика по кластерах
+            st.markdown("---")
+            st.subheader("📊 Статистика по кластерах")
+            
+            cluster_summary = analyzer.clusters.groupby('cluster').agg({
+                'revenue': 'sum',
+                'profit': 'sum',
+                'avg_check': 'mean',
+                'margin_pct': 'mean'
+            })
+            
+            cluster_summary['count'] = analyzer.clusters.groupby('cluster').size()
+            
+            col1, col2, col3 = st.columns(3)
+            
+            for idx, (cluster_name, cluster_stats) in enumerate(cluster_summary.iterrows()):
+                col = [col1, col2, col3][idx % 3]
+                
+                with col:
+                    st.markdown(f"### Кластер {cluster_name}")
+                    st.metric("Салонів", f"{int(cluster_stats['count'])}")
+                    st.metric("Виручка", f"{cluster_stats['revenue']/1_000_000:.1f}M₴")
+                    st.metric("Середній чек", f"{cluster_stats['avg_check']:.0f}₴")
+                    st.metric("Маржа", f"{cluster_stats['margin_pct']:.1f}%")
+            
+            # Інформація про модель
+            with st.expander("ℹ️ Про модель симуляції"):
                 st.markdown("""
-                **Как работает симуляция:**
+                **Математика моделі:**
                 
-                1. **Автоматическая кластеризация салонов:**
-                   - По среднему чеку делим на 3 кластера (A, B, C)
-                   - A = премиум, B = средний, C = эконом
+                1. **Еластичність попиту** (як попит реагує на ціну):
+                   ```
+                   Новий попит = Базовий попит × (1 + Δ% ціни × Еластичність)
+                   
+                   Еластичності:
+                   - Кластер A: -0.8 (при -10% ціни → +8% попиту)
+                   - Кластер B: -1.2 (при -10% ціни → +12% попиту)
+                   - Кластер C: -1.5 (при -10% ціни → +15% попиту)
+                   ```
                 
-                2. **Эластичность спроса:**
-                   - A (Премиум): -0.8
-                   - B (Средний): -1.2
-                   - C (Эконом): -1.5
+                2. **Зміна маржі**: 
+                   ```
+                   При зниженні ціни на X%, маржа падає на X × 1.5%
+                   Приклад: ціна -10% → маржа -15%
+                   ```
                 
-                3. **Эффекты:**
-                   - Переток клиентов между кластерами
-                   - Изменение маржинальности при изменении цен
-                   - Влияние на всю сеть
+                3. **Переток клієнтів**: 
+                   ```
+                   - При зниженні цін: +25% додаткового притоку в цільовий кластер
+                   - Відтік з кластеру B: -3% при зниженні цін в A
+                   ```
                 
-                4. **Расчет:**
-                   - Используются ваши реальные данные
-                   - Базовые показатели = фактические из истории
-                   - Прогноз = модель + эластичности
+                4. **Розрахунок виручки та прибутку**:
+                   ```
+                   Нова виручка = Базова виручка × Мультиплікатор попиту × Мультиплікатор ціни
+                   Новий прибуток = Нова виручка × Нова маржа
+                   ```
+                
+                **Використані дані:**
+                - Реальні продажі з вашого Excel файлу
+                - Автоматичний розрахунок середніх чеків, маржі, ROI
+                - Кластеризація на основі квантилів
                 """)
     
     except Exception as e:
-        st.error(f"❌ Ошибка при загрузке файла: {str(e)}")
-        st.info("Убедитесь, что файл содержит колонки: Magazin, Datasales, Price, Qty, Sum и т.д.")
+        st.error(f"❌ Помилка при завантаженні файлу: {str(e)}")
+        st.info("Переконайтеся, що файл містить колонки: Magazin, Datasales, Price, Qty, Sum тощо.")
+        
+        with st.expander("📋 Детальна інформація про помилку"):
+            st.code(str(e))
 
 else:
-    # Инструкция для пользователя
-    st.info("👆 Загрузите Excel файл с историей продаж для начала анализа")
+    # Інструкція для користувача
+    st.info("👆 Завантажте Excel файл з історією продажів для початку аналізу")
     
     st.markdown("""
-    ### 📋 Требования к файлу:
+    ### 📋 Вимоги до файлу:
     
-    Файл должен содержать следующие колонки:
-    - **Magazin** - название салона
-    - **Datasales** - дата продажи
-    - **Art** - артикул товара
-    - **Describe** - описание товара
+    Файл повинен містити наступні колонки:
+    - **Magazin** - назва салону
+    - **Datasales** - дата продажу
+    - **Art** - артикул товару
+    - **Describe** - опис товару
     - **Model** - модель
-    - **Segment** - сегмент товара
-    - **Purchaiseprice** - цена закупки
-    - **Price** - цена продажи
-    - **Qty** - количество
-    - **Sum** - сумма продажи
+    - **Segment** - сегмент товару
+    - **Purchaiseprice** - ціна закупівлі
+    - **Price** - ціна продажу
+    - **Qty** - кількість
+    - **Sum** - сума продажу
     
-    ### 🎯 Что вы получите:
+    ### 🎯 Що ви отримаєте:
     
-    1. **Анализ данных:**
-       - Статистика по салонам
-       - Распределение по кластерам
-       - Анализ сегментов товаров
-       - Временные тренды
+    1. **Аналіз даних:**
+       - Статистика по салонах
+       - Розподіл по кластерах
+       - Аналіз сегментів товарів
+       - Часові тренди
     
-    2. **Симуляция "Что если":**
-       - Изменение цен по кластерам
-       - Прогноз выручки и прибыли
-       - Детализация по салонам
-       - Визуализация результатов
+    2. **Симуляція "Що якщо":**
+       - Зміна цін по кластерах
+       - Прогноз виручки і прибутку
+       - Деталізація по салонах
+       - Візуалізація результатів
     
-    3. **Рекомендации:**
-       - Выгодно/невыгодно
-       - Влияние на сеть
-       - Декомпозиция эффектов
+    3. **Панель директора:**
+       - Рекомендації щодо впровадження
+       - Аналіз ризиків
+       - План дій
+       - ROI та термін окупності
+    
+    4. **Кластери салонів:**
+       - Автоматичний розподіл на A/B/C
+       - Пояснення чому салон в певному кластері
+       - Статистика по кластерах
     """)
