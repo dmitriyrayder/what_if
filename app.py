@@ -1180,7 +1180,7 @@ if uploaded_file is not None:
             # Експорт звіту
             st.subheader("📄 Експорт звіту")
 
-            if st.button("📥 Сгенерувати Executive Summary", use_container_width=True):
+            if st.button("📥 Згенерувати Executive Summary", use_container_width=True):
                 report = f"""
 # EXECUTIVE SUMMARY - Дашборд директора холдингу
 
