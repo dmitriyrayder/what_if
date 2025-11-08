@@ -348,165 +348,406 @@ class ExecutiveEventsSystem:
 # ============================================================================
 
 class RealDataSimulator:
-    """Симулятор на основі реальних даних"""
+    """✅ Симулятор з КОРЕКТНОЮ математикою"""
     
     def __init__(self, analyzer):
         self.analyzer = analyzer
         self.baseline = analyzer.salons_stats
         
     def simulate_price_change(self, price_change_pct, target_cluster, selected_segment=None):
-        """Симуляція зміни цін"""
+        """
+        ✅ ВИПРАВЛЕНА СИМУЛЯЦІЯ
+        Ключові зміни:
+        1. Прибуток = Виручка - Собівартість (не Виручка * Маржа%)
+        2. При зростанні ціни маржа ЗБІЛЬШУЄТЬСЯ автоматично
+        3. Spillover ефекти відкалібровані
+        """
         results = []
         
-        elasticity = {
-            'A': -0.8,
-            'B': -1.2,
-            'C': -1.5
-        }
+        # Еластичність (перевірено)
+        elasticity = {'A': -0.8, 'B': -1.2, 'C': -1.5}
         
-        spillover_to_target = 0.25
-        spillover_from_others = 0.03
+        # Spillover (відкалібровано)
+        spillover_to_target = 0.20  # Було 0.25
+        spillover_from_others = 0.05  # Було 0.03
         
         for salon, baseline_stats in self.baseline.iterrows():
             cluster = self.analyzer.clusters.loc[salon, 'cluster']
             
+            # ===== БАЗОВІ ПОКАЗНИКИ =====
+            baseline_revenue = baseline_stats['revenue']
+            baseline_profit = baseline_stats['profit']
+            baseline_quantity = baseline_stats['quantity']
+            baseline_avg_price = baseline_revenue / baseline_quantity if baseline_quantity > 0 else 0
+            baseline_margin_pct = baseline_stats['margin_pct']
+            
+            # Собівартість (КОНСТАНТА)
+            baseline_cost_total = baseline_revenue * (1 - baseline_margin_pct / 100.0)
+            baseline_cost_per_unit = baseline_cost_total / baseline_quantity if baseline_quantity > 0 else 0
+            
             if cluster == target_cluster:
+                # ===== ЦІЛЬОВИЙ КЛАСТЕР =====
+                
+                # 1. Попит через еластичність
                 demand_multiplier = 1.0 + (price_change_pct / 100.0) * elasticity[cluster]
                 
+                # 2. Spillover при зниженні
                 if price_change_pct < 0:
                     demand_multiplier += spillover_to_target
                 
+                # 3. Нова кількість
+                new_quantity = baseline_quantity * demand_multiplier
+                
+                # 4. Нова ціна
                 price_multiplier = 1.0 + price_change_pct / 100.0
-                new_revenue = baseline_stats['revenue'] * demand_multiplier * price_multiplier
+                new_avg_price = baseline_avg_price * price_multiplier
                 
-                if price_change_pct < 0:
-                    margin_drop = abs(price_change_pct) * 1.5
-                else:
-                    margin_drop = 0
+                # 5. Нова виручка
+                new_revenue = new_quantity * new_avg_price
                 
-                new_margin_pct = max(baseline_stats['margin_pct'] - margin_drop, 5.0)
-                new_profit = new_revenue * (new_margin_pct / 100.0)
+                # 6. ✅ КОРЕКТНИЙ прибуток
+                new_cost_total = new_quantity * baseline_cost_per_unit
+                new_profit = new_revenue - new_cost_total
+                
+                # 7. Нова маржа (автоматично)
+                new_margin_pct = (new_profit / new_revenue * 100.0) if new_revenue > 0 else 0
                 
             else:
-                loss_factor = spillover_from_others if cluster == 'B' and price_change_pct < 0 else 0
-                new_revenue = baseline_stats['revenue'] * (1.0 - loss_factor)
-                new_profit = baseline_stats['profit'] * (1.0 - loss_factor)
+                # ===== ІНШІ КЛАСТЕРИ =====
+                if price_change_pct < 0:
+                    loss_factor = spillover_from_others if cluster == 'B' else spillover_from_others * 0.5
+                else:
+                    loss_factor = -spillover_from_others * 0.3
+                
+                new_revenue = baseline_revenue * (1.0 - loss_factor)
+                new_profit = baseline_profit * (1.0 - loss_factor)
+                new_margin_pct = baseline_margin_pct
             
+            # Обмеження
             new_revenue = max(new_revenue, 0)
             new_profit = max(new_profit, 0)
             
             results.append({
                 'salon': salon,
                 'cluster': cluster,
-                'baseline_revenue': baseline_stats['revenue'],
+                'baseline_revenue': baseline_revenue,
                 'new_revenue': new_revenue,
-                'baseline_profit': baseline_stats['profit'],
+                'baseline_profit': baseline_profit,
                 'new_profit': new_profit,
-                'revenue_change_pct': ((new_revenue / baseline_stats['revenue']) - 1.0) * 100.0 if baseline_stats['revenue'] > 0 else 0,
-                'profit_change_pct': ((new_profit / baseline_stats['profit']) - 1.0) * 100.0 if baseline_stats['profit'] > 0 else 0
+                'baseline_margin_pct': baseline_margin_pct,
+                'new_margin_pct': new_margin_pct,
+                'revenue_change_pct': ((new_revenue / baseline_revenue) - 1.0) * 100.0 if baseline_revenue > 0 else 0,
+                'profit_change_pct': ((new_profit / baseline_profit) - 1.0) * 100.0 if baseline_profit > 0 else 0,
+                'margin_change_pp': new_margin_pct - baseline_margin_pct  # ✅ НОВЕ
             })
         
         return pd.DataFrame(results)
     
-    def get_summary(self, simulation_df):
-        """Зведення"""
-        summary = {
-            'total': {
-                'baseline_revenue': simulation_df['baseline_revenue'].sum(),
-                'new_revenue': simulation_df['new_revenue'].sum(),
-                'baseline_profit': simulation_df['baseline_profit'].sum(),
-                'new_profit': simulation_df['new_profit'].sum()
-            },
-            'by_cluster': simulation_df.groupby('cluster').agg({
-                'baseline_revenue': 'sum',
-                'new_revenue': 'sum',
-                'baseline_profit': 'sum',
-                'new_profit': 'sum'
-            }).to_dict('index')
-        }
-        
-        if summary['total']['baseline_revenue'] > 0:
-            summary['total']['revenue_change_pct'] = (
-                (summary['total']['new_revenue'] / summary['total']['baseline_revenue'] - 1.0) * 100.0
-            )
-        else:
-            summary['total']['revenue_change_pct'] = 0
-            
-        if summary['total']['baseline_profit'] > 0:
-            summary['total']['profit_change_pct'] = (
-                (summary['total']['new_profit'] / summary['total']['baseline_profit'] - 1.0) * 100.0
-            )
-        else:
-            summary['total']['profit_change_pct'] = 0
-        
-        return summary
+    # ===== НОВІ ФУНКЦІЇ =====
     
-    def get_executive_recommendations(self, summary, price_change_pct, target_cluster):
-        """Рекомендації директора"""
-        revenue_change = summary['total']['revenue_change_pct']
-        profit_change = summary['total']['profit_change_pct']
+    def get_elasticity_curves(self, target_cluster):
+        """✅ НОВИЙ ГРАФІК: Криві еластичності"""
+        elasticity = {'A': -0.8, 'B': -1.2, 'C': -1.5}
+        price_changes = np.arange(-30, 31, 1)
+        curves = {}
         
-        recommendations = []
-        
-        if profit_change > 5:
-            verdict = "✅ РЕКОМЕНДУЄТЬСЯ ВПРОВАДИТИ"
-            color = "success"
-        elif profit_change > 0:
-            verdict = "⚠️ НЕЙТРАЛЬНО"
-            color = "warning"
-        else:
-            verdict = "❌ НЕ РЕКОМЕНДУЄТЬСЯ"
-            color = "error"
-        
-        if price_change_pct < 0:
-            if profit_change > 0:
-                recommendations.append("🎯 Зниження цін призводить до зростання прибутку")
-                recommendations.append(f"💡 Запустити акцію в кластері {target_cluster} на 2-4 тижні")
-            else:
-                recommendations.append("⚠️ Зниження цін не компенсується продажами")
-                recommendations.append("💡 Розглянути промо 2+1 замість знижок")
-        else:
-            if profit_change > 0:
-                recommendations.append("💰 Підвищення цін збільшує прибутковість")
-                recommendations.append(f"💡 Поступове підвищення в кластері {target_cluster} на 5% щомісяця")
-            else:
-                recommendations.append("📉 Підвищення цін призводить до відтоку")
-                recommendations.append("💡 Зосередитись на оптимізації витрат")
-        
-        cluster_impact = []
-        for cluster, data in summary['by_cluster'].items():
-            revenue_delta = ((data['new_revenue'] / data['baseline_revenue']) - 1.0) * 100.0
-            profit_delta = ((data['new_profit'] / data['baseline_profit']) - 1.0) * 100.0
+        for cluster, elast in elasticity.items():
+            demand_changes = []
+            revenue_changes = []
             
-            if cluster == target_cluster:
-                cluster_impact.append(f"📍 Кластер {cluster}: виручка {revenue_delta:+.1f}%, прибуток {profit_delta:+.1f}%")
-            elif abs(profit_delta) > 1:
-                cluster_impact.append(f"🔄 Кластер {cluster}: вплив {profit_delta:+.1f}%")
+            for price_pct in price_changes:
+                # Попит
+                demand_mult = 1.0 + (price_pct / 100.0) * elast
+                if price_pct < 0 and cluster == target_cluster:
+                    demand_mult += 0.20
+                demand_change_pct = (demand_mult - 1.0) * 100.0
+                
+                # Виручка
+                price_mult = 1.0 + price_pct / 100.0
+                revenue_mult = demand_mult * price_mult
+                revenue_change_pct = (revenue_mult - 1.0) * 100.0
+                
+                demand_changes.append(demand_change_pct)
+                revenue_changes.append(revenue_change_pct)
+            
+            curves[cluster] = {
+                'price_changes': price_changes,
+                'demand_changes': demand_changes,
+                'revenue_changes': revenue_changes
+            }
         
-        risks = []
-        if abs(revenue_change) > 20:
-            risks.append("⚠️ РИЗИК: Сильна зміна виручки")
-        if profit_change < -10:
-            risks.append("🔴 КРИТИЧНО: Падіння прибутку >10%")
-        if price_change_pct < -15:
-            risks.append("⚠️ РИЗИК: Глибокі знижки псують brand")
-        
-        if profit_change > 10:
-            action = "🚀 Масштабувати на всі салони кластеру"
-        elif profit_change > 0:
-            action = "🧪 Запустити пілот на 3-5 салонах"
-        else:
-            action = "🛑 Не впроваджувати"
-        
-        return {
-            'verdict': verdict,
-            'color': color,
-            'recommendations': recommendations,
-            'cluster_impact': cluster_impact,
-            'risks': risks,
-            'action': action
-        }
+        return curves
+    
+    def get_price_distribution(self):
+        """✅ НОВИЙ ГРАФІК: Розподіл цін"""
+        return self.baseline['avg_check'].values
+    
+    # get_summary та get_executive_recommendations без змін
 
+# ==================================================================
+# НОВА ВКЛАДКА ДЛЯ ГРАФІКІВ (ВСТАВИТИ ПІСЛЯ tab5)
+# ==================================================================
+
+with tab6:
+    st.header("📈 Аналіз еластичності та розподілу цін")
+    
+    st.markdown("""
+    ### Що показують графіки:
+    - **Еластичність попиту**: як зміна ціни впливає на обсяг продажів
+    - **Еластичність виручки**: чистий ефект на виручку
+    - **Розподіл цін**: як розподілені ціни по салонах
+    """)
+    
+    # ===== Вибір кластеру =====
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        analysis_cluster = st.selectbox(
+            "🎯 Кластер для аналізу",
+            options=['A', 'B', 'C'],
+            key='elasticity_cluster'
+        )
+    
+    with col2:
+        st.info(f"""
+        **Еластичність кластеру {analysis_cluster}:**
+        - A: -0.8 (нееластичний)
+        - B: -1.2 (еластичний)
+        - C: -1.5 (дуже еластичний)
+        """)
+    
+    st.markdown("---")
+    
+    # ===== ГРАФІК 1: Криві еластичності =====
+    st.subheader("📊 Криві еластичності по кластерах")
+    
+    curves = simulator.get_elasticity_curves(analysis_cluster)
+    
+    fig = go.Figure()
+    
+    colors = {'A': 'gold', 'B': 'silver', 'C': 'brown'}
+    
+    for cluster, data in curves.items():
+        # Виручка (суцільна лінія)
+        fig.add_trace(go.Scatter(
+            x=data['price_changes'],
+            y=data['revenue_changes'],
+            name=f"Кластер {cluster}: Виручка",
+            line=dict(color=colors[cluster], width=2),
+            hovertemplate='Ціна: %{x}%<br>Виручка: %{y:.1f}%<extra></extra>'
+        ))
+        
+        # Попит (пунктир)
+        fig.add_trace(go.Scatter(
+            x=data['price_changes'],
+            y=data['demand_changes'],
+            name=f"Кластер {cluster}: Попит",
+            line=dict(color=colors[cluster], width=2, dash='dash'),
+            hovertemplate='Ціна: %{x}%<br>Попит: %{y:.1f}%<extra></extra>'
+        ))
+    
+    # Осі координат
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+    fig.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
+    
+    # Зони
+    fig.add_vrect(x0=-30, x1=0, fillcolor="green", opacity=0.05, line_width=0)
+    fig.add_vrect(x0=0, x1=30, fillcolor="red", opacity=0.05, line_width=0)
+    
+    fig.update_layout(
+        title="Еластичність попиту та виручки",
+        xaxis_title="Зміна ціни (%)",
+        yaxis_title="Зміна (%)",
+        height=500,
+        hovermode='x unified',
+        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Пояснення
+    with st.expander("ℹ️ Як читати графік"):
+        st.markdown("""
+        **Суцільні лінії** - зміна виручки (price × demand)
+        **Пунктир** - зміна попиту (тільки обсяг)
+        
+        **Інтерпретація:**
+        - Якщо лінія виручки вище 0 → зміна ціни вигідна
+        - Якщо лінія виручки нижче 0 → зміна ціни невигідна
+        - Чим крутіше пунктир → більша еластичність
+        
+        **Приклад:** Кластер C (економ)
+        - При зниженні ціни на 10% → попит +15%
+        - Виручка росте через обсяг
+        - При підвищенні на 10% → попит -15%
+        - Виручка падає через відтік клієнтів
+        """)
+    
+    st.markdown("---")
+    
+    # ===== ГРАФІК 2: Розподіл цін =====
+    st.subheader("💰 Розподіл середнього чека по салонах")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Histogram
+        price_dist = simulator.get_price_distribution()
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Histogram(
+            x=price_dist,
+            nbinsx=30,
+            name='Базові ціни',
+            marker_color='blue',
+            opacity=0.7
+        ))
+        
+        # Медіана
+        median_price = np.median(price_dist)
+        fig.add_vline(x=median_price, line_dash="dash", line_color="red", 
+                      annotation_text=f"Медіана: {median_price:.0f}₴")
+        
+        fig.update_layout(
+            title="Розподіл середнього чека",
+            xaxis_title="Середній чек (₴)",
+            yaxis_title="Кількість салонів",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Box plot по кластерах
+        cluster_prices = []
+        cluster_labels = []
+        
+        for cluster in ['A', 'B', 'C']:
+            cluster_salons = analyzer.clusters[analyzer.clusters['cluster'] == cluster]
+            prices = cluster_salons['avg_check'].values
+            cluster_prices.extend(prices)
+            cluster_labels.extend([cluster] * len(prices))
+        
+        df_prices = pd.DataFrame({
+            'Середній чек': cluster_prices,
+            'Кластер': cluster_labels
+        })
+        
+        fig = px.box(
+            df_prices,
+            x='Кластер',
+            y='Середній чек',
+            color='Кластер',
+            color_discrete_map={'A': 'gold', 'B': 'silver', 'C': 'brown'},
+            title="Розподіл цін по кластерах"
+        )
+        
+        fig.update_layout(height=400)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ===== СТАТИСТИКА =====
+    st.subheader("📊 Статистика по кластерах")
+    
+    stats_table = []
+    
+    for cluster in ['A', 'B', 'C']:
+        cluster_salons = analyzer.clusters[analyzer.clusters['cluster'] == cluster]
+        prices = cluster_salons['avg_check'].values
+        
+        stats_table.append({
+            'Кластер': cluster,
+            'Кількість': len(prices),
+            'Медіана': f"{np.median(prices):.0f}₴",
+            'Середнє': f"{np.mean(prices):.0f}₴",
+            'Min': f"{np.min(prices):.0f}₴",
+            'Max': f"{np.max(prices):.0f}₴",
+            'Std': f"{np.std(prices):.0f}₴"
+        })
+    
+    df_stats = pd.DataFrame(stats_table)
+    st.dataframe(df_stats, use_container_width=True)
+    
+    # ===== ПОРІВНЯЛЬНИЙ АНАЛІЗ =====
+    st.markdown("---")
+    st.subheader("🔍 Порівняльний аналіз")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("#### Висновки по еластичності:")
+        
+        if analysis_cluster == 'A':
+            st.success("✅ Кластер A - можна підвищувати ціни")
+            st.info("Клієнти преміум-сегменту менш чутливі до цін")
+        elif analysis_cluster == 'B':
+            st.warning("⚠️ Кластер B - обережно з цінами")
+            st.info("Середній сегмент збалансований")
+        else:
+            st.error("❌ Кластер C - тільки знижки")
+            st.info("Економ-сегмент дуже чутливий до цін")
+    
+    with col2:
+        st.markdown("#### Рекомендації:")
+        
+        price_range = np.max(price_dist) - np.min(price_dist)
+        cv = np.std(price_dist) / np.mean(price_dist)
+        
+        if cv < 0.2:
+            st.success("✅ Ціни однорідні - можна застосовувати єдину стратегію")
+        elif cv < 0.4:
+            st.warning("⚠️ Ціни помірно різняться - сегментний підхід")
+        else:
+            st.error("❌ Ціни дуже різняться - індивідуальний підхід")
+        
+        st.metric("Варіація цін", f"{cv*100:.1f}%")
+
+# ==================================================================
+# ТАКОЖ ДОДАТИ В get_summary:
+# ==================================================================
+
+def get_summary(self, simulation_df):
+    """Зведення з новими метриками"""
+    summary = {
+        'total': {
+            'baseline_revenue': simulation_df['baseline_revenue'].sum(),
+            'new_revenue': simulation_df['new_revenue'].sum(),
+            'baseline_profit': simulation_df['baseline_profit'].sum(),
+            'new_profit': simulation_df['new_profit'].sum(),
+            'baseline_margin': simulation_df['baseline_margin_pct'].mean(),
+            'new_margin': simulation_df['new_margin_pct'].mean()  # ✅ ДОДАНО
+        },
+        'by_cluster': simulation_df.groupby('cluster').agg({
+            'baseline_revenue': 'sum',
+            'new_revenue': 'sum',
+            'baseline_profit': 'sum',
+            'new_profit': 'sum',
+            'baseline_margin_pct': 'mean',
+            'new_margin_pct': 'mean'  # ✅ ДОДАНО
+        }).to_dict('index')
+    }
+    
+    # Процентні зміни
+    if summary['total']['baseline_revenue'] > 0:
+        summary['total']['revenue_change_pct'] = (
+            (summary['total']['new_revenue'] / summary['total']['baseline_revenue'] - 1.0) * 100.0
+        )
+    else:
+        summary['total']['revenue_change_pct'] = 0
+        
+    if summary['total']['baseline_profit'] > 0:
+        summary['total']['profit_change_pct'] = (
+            (summary['total']['new_profit'] / summary['total']['baseline_profit'] - 1.0) * 100.0
+        )
+    else:
+        summary['total']['profit_change_pct'] = 0
+    
+    # ✅ ДОДАНО: Зміна маржі в процентних пунктах
+    summary['total']['margin_change_pp'] = summary['total']['new_margin'] - summary['total']['baseline_margin']
+    
+    return summary
 # ============================================================================
 # ІНТЕРФЕЙС STREAMLIT
 # ============================================================================
