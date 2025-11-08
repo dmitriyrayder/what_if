@@ -4,48 +4,72 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
+
+# ============================================================================
+# ІНІЦІАЛІЗАЦІЯ SESSION STATE
+# ============================================================================
+
+if 'df' not in st.session_state:
+    st.session_state.df = None
 
 # ============================================================================
 # ФУНКЦІЇ ДЛЯ ЗАВАНТАЖЕННЯ ДАНИХ
 # ============================================================================
 
-@st.cache_data(ttl=600)
+def validate_dataframe(df):
+    """Перевірка структури даних"""
+    if df is None or df.empty:
+        return False, "Порожній датафрейм"
+    
+    required_columns = ['Magazin', 'Datasales', 'Price', 'Qty', 'Sum']
+    missing = [col for col in required_columns if col not in df.columns]
+    
+    if missing:
+        return False, f"Відсутні колонки: {', '.join(missing)}"
+    
+    return True, "OK"
+
+@st.cache_data(ttl=600, show_spinner=False)
 def load_data_from_google_sheets(spreadsheet_url):
-    """
-    Завантаження даних з Google Sheets (публічна таблиця)
-
-    Args:
-        spreadsheet_url: URL Google Sheets таблиці
-
-    Returns:
-        pandas.DataFrame: Завантажені дані
-    """
+    """Завантаження даних з Google Sheets"""
     try:
-        # Витягуємо ID таблиці з URL
-        if '/d/' in spreadsheet_url:
-            sheet_id = spreadsheet_url.split('/d/')[1].split('/')[0]
-        else:
-            raise ValueError("Невірний формат URL Google Sheets")
-
-        # Витягуємо GID (ID аркуша) якщо є
-        gid = '0'  # За замовчуванням перший аркуш
+        # Перевірка URL
+        if not spreadsheet_url or '/d/' not in spreadsheet_url:
+            return None, "Невірний формат URL"
+        
+        # Витягуємо ID
+        sheet_id = spreadsheet_url.split('/d/')[1].split('/')[0]
+        gid = '0'
         if 'gid=' in spreadsheet_url:
             gid = spreadsheet_url.split('gid=')[1].split('&')[0].split('#')[0]
-
-        # Формуємо URL для експорту в CSV
+        
+        # URL для експорту
         export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-
-        # Завантажуємо дані
-        df = pd.read_csv(export_url)
-
-        return df
-
+        
+        # Завантаження
+        df = pd.read_csv(export_url, encoding='utf-8', on_bad_lines='skip')
+        
+        if df.empty:
+            return None, "Таблиця порожня"
+        
+        return df, None
+        
     except Exception as e:
-        st.error(f"Помилка при завантаженні з Google Sheets: {str(e)}")
-        st.info("Переконайтеся, що таблиця має публічний доступ (доступна для перегляду всім, хто має посилання)")
-        return None
+        return None, str(e)
+
+def load_excel_file(uploaded_file):
+    """Завантаження Excel файлу"""
+    try:
+        # Спроба з openpyxl
+        df = pd.read_excel(uploaded_file, engine='openpyxl')
+        return df, None
+    except Exception as e1:
+        try:
+            # Спроба з xlrd
+            df = pd.read_excel(uploaded_file, engine='xlrd')
+            return df, None
+        except Exception as e2:
+            return None, f"Помилка: {str(e1)}"
 
 # ============================================================================
 # АНАЛІЗАТОР ДАНИХ
@@ -81,20 +105,19 @@ class SalesDataAnalyzer:
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
         
-        # Очищення від NaN значень
+        # Очищення від NaN
         df = df.dropna(subset=['price', 'quantity', 'revenue'])
         
-        # Перевірка коректності даних
+        # Перевірка коректності
         df = df[df['price'] > 0]
         df = df[df['quantity'] > 0]
         df = df[df['revenue'] > 0]
         
-        # Розрахунок прибутку та маржі
+        # Розрахунок прибутку
         if 'cost_price' in df.columns and 'price' in df.columns:
             df['profit'] = (df['price'] - df['cost_price']) * df['quantity']
             df['margin'] = ((df['price'] - df['cost_price']) / df['price'] * 100).clip(0, 100)
         else:
-            # Якщо немає закупівельної ціни, припускаємо маржу 40%
             df['profit'] = df['revenue'] * 0.40
             df['margin'] = 40.0
         
@@ -111,22 +134,16 @@ class SalesDataAnalyzer:
             'date': 'count'
         }).rename(columns={'date': 'transactions'})
         
-        # Середній чек
         stats['avg_check'] = stats['revenue'] / stats['transactions']
-        
-        # Маржинальність
         stats['margin_pct'] = (stats['profit'] / stats['revenue'] * 100).fillna(0)
-        
-        # ROI
         stats['roi'] = ((stats['profit'] / (stats['revenue'] - stats['profit'])) * 100).fillna(0)
         
         return stats.sort_values('revenue', ascending=False)
     
     def _create_clusters(self):
-        """Автоматична кластеризація салонів"""
+        """Кластеризація салонів"""
         stats = self.salons_stats.copy()
         
-        # Квантілі для розділення
         q33 = stats['avg_check'].quantile(0.33)
         q66 = stats['avg_check'].quantile(0.66)
         
@@ -152,7 +169,7 @@ class SalesDataAnalyzer:
         return stats
     
     def get_segment_analysis(self):
-        """Аналіз по сегментах товарів"""
+        """Аналіз по сегментах"""
         if 'segment' not in self.df.columns:
             return None
             
@@ -164,13 +181,12 @@ class SalesDataAnalyzer:
             'margin': 'mean'
         }).sort_values('revenue', ascending=False)
         
-        # Додаємо частку в загальній виручці
         segment_stats['revenue_share'] = (segment_stats['revenue'] / segment_stats['revenue'].sum() * 100)
         
         return segment_stats
     
     def get_time_series(self):
-        """Часовий ряд продажів"""
+        """Часовий ряд"""
         if 'date' not in self.df.columns:
             return None
             
@@ -183,7 +199,7 @@ class SalesDataAnalyzer:
         return ts
     
     def get_top_products(self, n=10):
-        """Топ товарів за виручкою"""
+        """Топ товарів"""
         if 'model' not in self.df.columns:
             return None
             
@@ -196,11 +212,11 @@ class SalesDataAnalyzer:
         return products
 
 # ============================================================================
-# СИСТЕМА ПОДІЙ ТА АНАЛІТИКИ ДЛЯ ДИРЕКТОРА
+# СИСТЕМА ПОДІЙ
 # ============================================================================
 
 class ExecutiveEventsSystem:
-    """Система подій, трендів та попереджень для керівництва"""
+    """Система подій та трендів"""
 
     def __init__(self, analyzer):
         self.analyzer = analyzer
@@ -212,10 +228,10 @@ class ExecutiveEventsSystem:
         self._detect_warnings()
 
     def _detect_events(self):
-        """Виявлення важливих подій в даних"""
+        """Виявлення подій"""
         salons_stats = self.analyzer.salons_stats
 
-        # Подія 1: Топ-перформер
+        # Топ-перформер
         top_salon = salons_stats.head(1)
         if not top_salon.empty:
             salon_name = top_salon.index[0]
@@ -227,128 +243,81 @@ class ExecutiveEventsSystem:
                 'priority': 'high'
             })
 
-        # Подія 2: Низькомаржинальні салони
+        # Низька маржа
         low_margin_salons = salons_stats[salons_stats['margin_pct'] < 20]
         if len(low_margin_salons) > 0:
             self.events.append({
                 'type': 'warning',
                 'title': '⚠️ Низька маржинальність',
-                'description': f"Виявлено {len(low_margin_salons)} салонів з маржею <20%. Потрібна оптимізація асортименту.",
+                'description': f"Виявлено {len(low_margin_salons)} салонів з маржею <20%",
                 'priority': 'high'
             })
 
-        # Подія 3: Високий ROI
+        # Високий ROI
         high_roi_salons = salons_stats[salons_stats['roi'] > 50]
         if len(high_roi_salons) > 0:
             self.events.append({
                 'type': 'success',
                 'title': '💎 Високий ROI',
-                'description': f"{len(high_roi_salons)} салонів показують ROI >50%. Це еталон для масштабування!",
-                'priority': 'medium'
-            })
-
-        # Подія 4: Великі чеки
-        high_check_salons = salons_stats[salons_stats['avg_check'] > salons_stats['avg_check'].quantile(0.75)]
-        if len(high_check_salons) > 0:
-            avg_high_check = high_check_salons['avg_check'].mean()
-            self.events.append({
-                'type': 'info',
-                'title': '💰 Преміум-сегмент',
-                'description': f"{len(high_check_salons)} салонів з високим середнім чеком ({avg_high_check:.0f}₴). Потенціал для upselling!",
+                'description': f"{len(high_roi_salons)} салонів показують ROI >50%",
                 'priority': 'medium'
             })
 
     def _detect_trends(self):
-        """Виявлення трендів в даних"""
+        """Виявлення трендів"""
         ts = self.analyzer.get_time_series()
 
-        if ts is not None and len(ts) >= 3:
-            # Тренд виручки
+        if ts is not None and len(ts) >= 2:
             revenue_values = ts['revenue'].values
-            if len(revenue_values) >= 2:
-                last_month = revenue_values[-1]
-                prev_month = revenue_values[-2]
-                change_pct = ((last_month / prev_month) - 1) * 100 if prev_month > 0 else 0
+            last_month = revenue_values[-1]
+            prev_month = revenue_values[-2]
+            change_pct = ((last_month / prev_month) - 1) * 100 if prev_month > 0 else 0
 
-                if change_pct > 10:
-                    self.trends.append({
-                        'metric': 'Виручка',
-                        'direction': 'up',
-                        'change': f"+{change_pct:.1f}%",
-                        'status': 'positive',
-                        'description': 'Сильне зростання продажів за останній місяць'
-                    })
-                elif change_pct < -10:
-                    self.trends.append({
-                        'metric': 'Виручка',
-                        'direction': 'down',
-                        'change': f"{change_pct:.1f}%",
-                        'status': 'negative',
-                        'description': 'Падіння продажів! Потрібен аналіз причин'
-                    })
-                else:
-                    self.trends.append({
-                        'metric': 'Виручка',
-                        'direction': 'stable',
-                        'change': f"{change_pct:+.1f}%",
-                        'status': 'neutral',
-                        'description': 'Стабільний рівень продажів'
-                    })
-
-        # Тренд по кластерах
-        clusters = self.analyzer.clusters
-        cluster_revenue = clusters.groupby('cluster')['revenue'].sum()
-
-        if 'A' in cluster_revenue.index and 'C' in cluster_revenue.index:
-            premium_share = cluster_revenue['A'] / cluster_revenue.sum() * 100
-            if premium_share > 40:
+            if change_pct > 10:
                 self.trends.append({
-                    'metric': 'Структура портфелю',
+                    'metric': 'Виручка',
                     'direction': 'up',
-                    'change': f"{premium_share:.1f}% premium",
+                    'change': f"+{change_pct:.1f}%",
                     'status': 'positive',
-                    'description': 'Висока частка преміум-сегменту. Сильний бренд!'
+                    'description': 'Сильне зростання продажів'
+                })
+            elif change_pct < -10:
+                self.trends.append({
+                    'metric': 'Виручка',
+                    'direction': 'down',
+                    'change': f"{change_pct:.1f}%",
+                    'status': 'negative',
+                    'description': 'Падіння продажів'
                 })
 
     def _detect_warnings(self):
-        """Виявлення попереджень та ризиків"""
+        """Виявлення ризиків"""
         salons_stats = self.analyzer.salons_stats
 
-        # Попередження 1: Від'ємний ROI
+        # Від'ємний ROI
         negative_roi = salons_stats[salons_stats['roi'] < 0]
         if len(negative_roi) > 0:
             self.warnings.append({
                 'level': 'critical',
-                'title': '🔴 КРИТИЧНО: Від\'ємний ROI',
-                'description': f"{len(negative_roi)} салонів працюють в збиток!",
-                'action': 'Негайно провести аудит цих салонів',
+                'title': '🔴 Від\'ємний ROI',
+                'description': f"{len(negative_roi)} салонів працюють в збиток",
+                'action': 'Негайно провести аудит',
                 'impact': 'high'
             })
 
-        # Попередження 2: Низька активність
+        # Низька активність
         low_transactions = salons_stats[salons_stats['transactions'] < salons_stats['transactions'].quantile(0.1)]
         if len(low_transactions) > 0:
             self.warnings.append({
                 'level': 'warning',
                 'title': '⚠️ Низька активність',
-                'description': f"{len(low_transactions)} салонів з дуже низькою кількістю продажів",
-                'action': 'Розглянути маркетингові активності або оптимізацію локації',
-                'impact': 'medium'
-            })
-
-        # Попередження 3: Дисбаланс кластерів
-        cluster_counts = self.analyzer.clusters['cluster'].value_counts()
-        if 'C' in cluster_counts.index and cluster_counts['C'] > len(self.analyzer.clusters) * 0.5:
-            self.warnings.append({
-                'level': 'warning',
-                'title': '📊 Дисбаланс портфелю',
-                'description': f"Понад 50% салонів в економ-сегменті (кластер C)",
-                'action': 'Розглянути стратегію premium-позиціонування',
+                'description': f"{len(low_transactions)} салонів з низькими продажами",
+                'action': 'Розглянути маркетингові активності',
                 'impact': 'medium'
             })
 
     def get_executive_dashboard_data(self):
-        """Отримати дані для дашборду директора"""
+        """Дані дашборду"""
         return {
             'events': self.events,
             'trends': self.trends,
@@ -372,65 +341,43 @@ class RealDataSimulator:
         self.baseline = analyzer.salons_stats
         
     def simulate_price_change(self, price_change_pct, target_cluster, selected_segment=None):
-        """
-        Симуляція зміни цін
-        
-        Математика:
-        1. Новий попит = Базовий попит × (1 + ΔЦіна × Еластичність)
-        2. При зниженні цін додаємо приплив клієнтів
-        3. Нова виручка = Новий попит × Нова ціна
-        4. Новий прибуток = Нова виручка × Нова маржа
-        """
+        """Симуляція зміни цін"""
         results = []
         
-        # Еластичності по кластерах (перевірено на реальних даних)
         elasticity = {
-            'A': -0.8,   # Преміум: при -10% ціни → +8% попиту
-            'B': -1.2,   # Середній: при -10% ціни → +12% попиту
-            'C': -1.5    # Економ: при -10% ціни → +15% попиту
+            'A': -0.8,
+            'B': -1.2,
+            'C': -1.5
         }
         
-        # Ефект перетоку клієнтів
-        spillover_to_target = 0.25    # +25% додатковий приплив при зниженні цін
-        spillover_from_others = 0.03  # 3% відтік з інших кластерів
+        spillover_to_target = 0.25
+        spillover_from_others = 0.03
         
         for salon, baseline_stats in self.baseline.iterrows():
             cluster = self.analyzer.clusters.loc[salon, 'cluster']
             
             if cluster == target_cluster:
-                # Салон зі зміною ціни
-                
-                # 1. Зміна попиту (еластичність)
-                # Формула: demand_multiplier = 1 + (% зміни ціни / 100) × еластичність
                 demand_multiplier = 1.0 + (price_change_pct / 100.0) * elasticity[cluster]
                 
-                # 2. Приплив клієнтів при зниженні цін
                 if price_change_pct < 0:
                     demand_multiplier += spillover_to_target
                 
-                # 3. Нова виручка = Базова виручка × Мультиплікатор попиту × Мультиплікатор ціни
                 price_multiplier = 1.0 + price_change_pct / 100.0
                 new_revenue = baseline_stats['revenue'] * demand_multiplier * price_multiplier
                 
-                # 4. Зміна маржі (при зниженні ціни маржа падає сильніше)
                 if price_change_pct < 0:
-                    margin_drop = abs(price_change_pct) * 1.5  # При -10% ціни → -15% маржі
+                    margin_drop = abs(price_change_pct) * 1.5
                 else:
-                    margin_drop = 0  # При підвищенні ціни маржа зростає
+                    margin_drop = 0
                 
                 new_margin_pct = max(baseline_stats['margin_pct'] - margin_drop, 5.0)
-                
-                # 5. Новий прибуток = Нова виручка × Нова маржа
                 new_profit = new_revenue * (new_margin_pct / 100.0)
                 
             else:
-                # Салони без змін
                 loss_factor = spillover_from_others if cluster == 'B' and price_change_pct < 0 else 0
-                
                 new_revenue = baseline_stats['revenue'] * (1.0 - loss_factor)
                 new_profit = baseline_stats['profit'] * (1.0 - loss_factor)
             
-            # Перевірка на від'ємні значення
             new_revenue = max(new_revenue, 0)
             new_profit = max(new_profit, 0)
             
@@ -448,7 +395,7 @@ class RealDataSimulator:
         return pd.DataFrame(results)
     
     def get_summary(self, simulation_df):
-        """Зведення по симуляції"""
+        """Зведення"""
         summary = {
             'total': {
                 'baseline_revenue': simulation_df['baseline_revenue'].sum(),
@@ -464,7 +411,6 @@ class RealDataSimulator:
             }).to_dict('index')
         }
         
-        # Розрахунок змін
         if summary['total']['baseline_revenue'] > 0:
             summary['total']['revenue_change_pct'] = (
                 (summary['total']['new_revenue'] / summary['total']['baseline_revenue'] - 1.0) * 100.0
@@ -482,72 +428,61 @@ class RealDataSimulator:
         return summary
     
     def get_executive_recommendations(self, summary, price_change_pct, target_cluster):
-        """Рекомендації для директора холдингу"""
+        """Рекомендації директора"""
         revenue_change = summary['total']['revenue_change_pct']
         profit_change = summary['total']['profit_change_pct']
         
         recommendations = []
         
-        # Основний вердикт
         if profit_change > 5:
             verdict = "✅ РЕКОМЕНДУЄТЬСЯ ВПРОВАДИТИ"
             color = "success"
         elif profit_change > 0:
-            verdict = "⚠️ НЕЙТРАЛЬНО (низький позитивний ефект)"
+            verdict = "⚠️ НЕЙТРАЛЬНО"
             color = "warning"
         else:
             verdict = "❌ НЕ РЕКОМЕНДУЄТЬСЯ"
             color = "error"
         
-        # Детальні рекомендації
         if price_change_pct < 0:
-            # Зниження цін
             if profit_change > 0:
-                recommendations.append("🎯 Зниження цін призводить до зростання прибутку за рахунок збільшення обсягів продажів")
-                recommendations.append(f"💡 Рекомендація: Запустити акцію в кластері {target_cluster} на 2-4 тижні")
-                recommendations.append("⏰ Моніторити щоденно перші 7 днів для коригування стратегії")
+                recommendations.append("🎯 Зниження цін призводить до зростання прибутку")
+                recommendations.append(f"💡 Запустити акцію в кластері {target_cluster} на 2-4 тижні")
             else:
-                recommendations.append("⚠️ Зниження цін не компенсується зростанням продажів")
-                recommendations.append(f"💡 Альтернатива: Замість зниження цін розглянути промо 2+1 або подарунки")
-                recommendations.append("📊 Провести A/B тест на 2-3 салонах перед масштабуванням")
+                recommendations.append("⚠️ Зниження цін не компенсується продажами")
+                recommendations.append("💡 Розглянути промо 2+1 замість знижок")
         else:
-            # Підвищення цін
             if profit_change > 0:
-                recommendations.append("💰 Підвищення цін призводить до зростання прибутковості")
-                recommendations.append(f"💡 Рекомендація: Поступове підвищення цін в кластері {target_cluster} на 5% щомісяця")
-                recommendations.append("🎯 Супроводжувати підвищення покращенням сервісу")
+                recommendations.append("💰 Підвищення цін збільшує прибутковість")
+                recommendations.append(f"💡 Поступове підвищення в кластері {target_cluster} на 5% щомісяця")
             else:
-                recommendations.append("📉 Підвищення цін призводить до критичного відтоку клієнтів")
-                recommendations.append("💡 Рекомендація: Не підвищувати ціни, зосередитись на оптимізації витрат")
+                recommendations.append("📉 Підвищення цін призводить до відтоку")
+                recommendations.append("💡 Зосередитись на оптимізації витрат")
         
-        # Аналіз по кластерах
         cluster_impact = []
         for cluster, data in summary['by_cluster'].items():
             revenue_delta = ((data['new_revenue'] / data['baseline_revenue']) - 1.0) * 100.0
             profit_delta = ((data['new_profit'] / data['baseline_profit']) - 1.0) * 100.0
             
             if cluster == target_cluster:
-                cluster_impact.append(f"📍 Кластер {cluster} (цільовий): виручка {revenue_delta:+.1f}%, прибуток {profit_delta:+.1f}%")
-            else:
-                if abs(profit_delta) > 1:
-                    cluster_impact.append(f"🔄 Кластер {cluster}: вплив {profit_delta:+.1f}% (ефект перетоку)")
+                cluster_impact.append(f"📍 Кластер {cluster}: виручка {revenue_delta:+.1f}%, прибуток {profit_delta:+.1f}%")
+            elif abs(profit_delta) > 1:
+                cluster_impact.append(f"🔄 Кластер {cluster}: вплив {profit_delta:+.1f}%")
         
-        # Ризики
         risks = []
         if abs(revenue_change) > 20:
-            risks.append("⚠️ РИЗИК: Занадто сильна зміна виручки може дестабілізувати ланцюг постачання")
+            risks.append("⚠️ РИЗИК: Сильна зміна виручки")
         if profit_change < -10:
-            risks.append("🔴 КРИТИЧНИЙ РИЗИК: Падіння прибутку >10% загрожує фінансовій стійкості")
+            risks.append("🔴 КРИТИЧНО: Падіння прибутку >10%")
         if price_change_pct < -15:
-            risks.append("⚠️ РИЗИК: Глибокі знижки можуть зіпсувати brand perception")
+            risks.append("⚠️ РИЗИК: Глибокі знижки псують brand")
         
-        # Термінова стратегія
         if profit_change > 10:
-            action = "🚀 НЕГАЙНІ ДІЇ: Масштабувати на всі салони кластеру протягом тижня"
+            action = "🚀 Масштабувати на всі салони кластеру"
         elif profit_change > 0:
-            action = "🧪 ТЕСТ: Запустити пілот на 3-5 салонах, аналіз через 2 тижні"
+            action = "🧪 Запустити пілот на 3-5 салонах"
         else:
-            action = "🛑 ЗУПИНИТИ: Не впроваджувати, шукати альтернативні стратегії"
+            action = "🛑 Не впроваджувати"
         
         return {
             'verdict': verdict,
@@ -575,20 +510,16 @@ st.markdown("### На основі ваших реальних даних про
 # ЗАВАНТАЖЕННЯ ДАНИХ
 # ============================================================================
 
-# Переключатель джерела даних
 data_source = st.radio(
     "📊 Оберіть джерело даних:",
     options=["Google Sheets", "Локальний Excel файл"],
-    index=0,  # За замовчуванням Google Sheets
+    index=0,
     horizontal=True
 )
 
 st.markdown("---")
 
-df = None
-
 if data_source == "Google Sheets":
-    # Завантаження з Google Sheets
     st.markdown("### 📑 Google Sheets")
 
     default_url = "https://docs.google.com/spreadsheets/d/1lJLON5N_EKQ5ICv0Pprp5DamP1tNAhBIph4uEoWC04Q/edit?gid=64159818#gid=64159818"
@@ -596,56 +527,89 @@ if data_source == "Google Sheets":
     sheets_url = st.text_input(
         "URL таблиці Google Sheets:",
         value=default_url,
-        help="Вставте посилання на вашу Google Sheets таблицю. Таблиця повинна мати публічний доступ!"
+        help="Таблиця повинна мати публічний доступ"
     )
 
-    if st.button("🔄 Завантажити дані з Google Sheets", type="primary", use_container_width=True):
-        with st.spinner('Завантаження даних з Google Sheets...'):
-            df = load_data_from_google_sheets(sheets_url)
-
-            if df is not None:
-                st.success(f"✅ Завантажено {len(df):,} рядків з Google Sheets")
-            else:
-                st.error("❌ Не вдалося завантажити дані з Google Sheets")
-
-    # Автоматична загрузка при старті (для зручності)
-    if df is None and sheets_url:
-        with st.spinner('Завантаження даних з Google Sheets...'):
-            df = load_data_from_google_sheets(sheets_url)
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        if st.button("🔄 Завантажити дані", type="primary", use_container_width=True):
+            with st.spinner('Завантаження з Google Sheets...'):
+                loaded_df, error = load_data_from_google_sheets(sheets_url)
+                
+                if error:
+                    st.error(f"❌ Помилка: {error}")
+                    st.info("Переконайтеся, що таблиця має публічний доступ")
+                    st.session_state.df = None
+                else:
+                    is_valid, validation_msg = validate_dataframe(loaded_df)
+                    if is_valid:
+                        st.session_state.df = loaded_df
+                        st.success(f"✅ Завантажено {len(loaded_df):,} рядків")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {validation_msg}")
+                        st.info(f"Наявні колонки: {', '.join(loaded_df.columns.tolist())}")
+                        st.session_state.df = None
+    
+    with col2:
+        if st.button("🗑️ Очистити", use_container_width=True):
+            st.session_state.df = None
+            st.rerun()
 
 else:
-    # Завантаження локального файлу
     st.markdown("### 📁 Локальний Excel файл")
 
     uploaded_file = st.file_uploader(
         "Завантажте Excel файл з історією продажів",
         type=['xlsx', 'xls'],
-        help="Виберіть Excel файл з вашого комп'ютера"
+        help="Виберіть файл з вашого комп'ютера"
     )
 
     if uploaded_file is not None:
-        with st.spinner('Завантаження та обробка Excel файлу...'):
-            df = pd.read_excel(uploaded_file)
-            st.success(f"✅ Завантажено {len(df):,} рядків з Excel файлу")
+        with st.spinner('Завантаження Excel...'):
+            loaded_df, error = load_excel_file(uploaded_file)
+            
+            if error:
+                st.error(f"❌ {error}")
+                st.session_state.df = None
+            else:
+                is_valid, validation_msg = validate_dataframe(loaded_df)
+                if is_valid:
+                    st.session_state.df = loaded_df
+                    st.success(f"✅ Завантажено {len(loaded_df):,} рядків")
+                else:
+                    st.error(f"❌ {validation_msg}")
+                    st.session_state.df = None
 
 st.markdown("---")
 
-# Обробка даних якщо вони завантажені
-if df is not None:
+# ============================================================================
+# ОБРОБКА ДАНИХ
+# ============================================================================
 
+df = st.session_state.df
+
+if df is not None:
     try:
         with st.spinner('Аналіз даних...'):
             analyzer = SalesDataAnalyzer(df)
             simulator = RealDataSimulator(analyzer)
             events_system = ExecutiveEventsSystem(analyzer)
 
-        st.success(f"✅ Проаналізовано {len(df):,} записів про продажі | {analyzer.df['salon'].nunique()} салонів")
+        st.success(f"✅ Проаналізовано {len(df):,} записів | {analyzer.df['salon'].nunique()} салонів")
         
         # ====================================================================
         # ВКЛАДКИ
         # ====================================================================
         
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Аналіз даних", "🎯 Симуляція", "🏆 Для директора", "📋 Кластери салонів", "🎯 Дашборд директора"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📊 Аналіз даних", 
+            "🎯 Симуляція", 
+            "🏆 Для директора", 
+            "📋 Кластери салонів", 
+            "🎯 Дашборд директора"
+        ])
         
         # ====================================================================
         # ВКЛАДКА 1: АНАЛІЗ ДАНИХ
@@ -654,7 +618,7 @@ if df is not None:
         with tab1:
             st.header("Аналіз поточних даних")
             
-            # Загальна статистика
+            # Метрики
             col1, col2, col3, col4, col5 = st.columns(5)
             
             total_revenue = analyzer.df['revenue'].sum()
@@ -668,15 +632,15 @@ if df is not None:
             with col2:
                 st.metric("💵 Прибуток", f"{total_profit / 1_000_000:.1f}M₴")
             with col3:
-                st.metric("📦 Продано одиниць", f"{total_qty:,.0f}")
+                st.metric("📦 Продано", f"{total_qty:,.0f}")
             with col4:
-                st.metric("📈 Середня маржа", f"{avg_margin:.1f}%")
+                st.metric("📈 Маржа", f"{avg_margin:.1f}%")
             with col5:
                 st.metric("🧾 Середній чек", f"{avg_check:.0f}₴")
             
             st.markdown("---")
             
-            # Статистика по салонах
+            # Статистика
             col1, col2 = st.columns(2)
             
             with col1:
@@ -697,14 +661,14 @@ if df is not None:
                 fig = px.pie(
                     values=cluster_dist.values,
                     names=[f"Кластер {c}" for c in cluster_dist.index],
-                    title="Кількість салонів по кластерах",
+                    title="Кількість салонів",
                     color=cluster_dist.index,
                     color_discrete_map={'A': 'gold', 'B': 'silver', 'C': 'brown'}
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
             # Топ товарів
-            st.subheader("🏅 Топ-10 товарів за виручкою")
+            st.subheader("🏅 Топ-10 товарів")
             top_products = analyzer.get_top_products(10)
             if top_products is not None:
                 top_products_display = top_products.copy()
@@ -713,10 +677,10 @@ if df is not None:
                 top_products_display.columns = ['Виручка', 'Прибуток', 'Кількість']
                 st.dataframe(top_products_display, use_container_width=True)
             
-            # Аналіз по сегментах
+            # Сегменти
             segment_stats = analyzer.get_segment_analysis()
             if segment_stats is not None:
-                st.subheader("🏷️ Продажі по сегментах товарів")
+                st.subheader("🏷️ Продажі по сегментах")
                 
                 col1, col2 = st.columns(2)
                 
@@ -771,19 +735,18 @@ if df is not None:
         with tab2:
             st.header("Сценарій: Зміна цінової політики")
             
-            # Параметри симуляції
             col1, col2 = st.columns(2)
             
             with col1:
                 cluster = st.selectbox(
-                    "Кластер салонів для зміни цін",
+                    "Кластер салонів",
                     options=['A', 'B', 'C'],
                     help="A - Преміум, B - Середній, C - Економ"
                 )
                 
                 cluster_info = analyzer.clusters[analyzer.clusters['cluster'] == cluster]
                 cluster_revenue = cluster_info['revenue'].sum()
-                st.info(f"📍 У кластері {cluster}: {len(cluster_info)} салонів | Виручка: {cluster_revenue/1_000_000:.1f}M₴")
+                st.info(f"📍 Кластер {cluster}: {len(cluster_info)} салонів | {cluster_revenue/1_000_000:.1f}M₴")
             
             with col2:
                 price_change = st.slider(
@@ -791,16 +754,14 @@ if df is not None:
                     min_value=-30,
                     max_value=30,
                     value=-10,
-                    step=5,
-                    help="Від'ємне значення = зниження, позитивне = підвищення"
+                    step=5
                 )
                 
                 if price_change < 0:
-                    st.warning(f"📉 Зниження цін на {abs(price_change)}%")
+                    st.warning(f"📉 Зниження на {abs(price_change)}%")
                 else:
-                    st.info(f"📈 Підвищення цін на {price_change}%")
+                    st.info(f"📈 Підвищення на {price_change}%")
             
-            # Кнопка запуску
             if st.button("🚀 Запустити симуляцію", type="primary", use_container_width=True):
                 
                 with st.spinner("Розрахунок..."):
@@ -808,9 +769,8 @@ if df is not None:
                     summary = simulator.get_summary(results)
                     exec_rec = simulator.get_executive_recommendations(summary, price_change, cluster)
                 
-                # Результати
                 st.markdown("---")
-                st.subheader("📊 Результати симуляції")
+                st.subheader("📊 Результати")
                 
                 col1, col2, col3, col4 = st.columns(4)
                 
@@ -843,7 +803,6 @@ if df is not None:
                         f"{summary['total']['new_profit'] / 1_000_000:.1f}M₴"
                     )
                 
-                # Вердикт
                 st.markdown("---")
                 if exec_rec['color'] == 'success':
                     st.success(exec_rec['verdict'])
@@ -852,7 +811,6 @@ if df is not None:
                 else:
                     st.error(exec_rec['verdict'])
                 
-                # Графіки
                 st.markdown("---")
                 
                 col1, col2 = st.columns(2)
@@ -913,12 +871,11 @@ if df is not None:
                     fig.update_layout(barmode='group', yaxis_title='Прибуток (млн ₴)', height=400)
                     st.plotly_chart(fig, use_container_width=True)
                 
-                # Таблиця результатів
                 st.markdown("---")
-                st.subheader("📋 Детялізація по салонах")
+                st.subheader("📋 Детальна таблиця")
                 
                 filter_cluster = st.selectbox(
-                    "Показати салони кластеру:",
+                    "Показати салони:",
                     options=['Всі'] + list(results['cluster'].unique())
                 )
                 
@@ -941,6 +898,12 @@ if df is not None:
                     display_table[col] = display_table[col].apply(lambda x: f"{x:+.1f}%")
                 
                 st.dataframe(display_table, use_container_width=True, height=400)
+                
+                # Зберігаємо результати для вкладки директора
+                st.session_state.exec_rec = exec_rec
+                st.session_state.summary = summary
+                st.session_state.revenue_change = revenue_change
+                st.session_state.profit_change = profit_change
         
         # ====================================================================
         # ВКЛАДКА 3: ДЛЯ ДИРЕКТОРА
@@ -949,10 +912,15 @@ if df is not None:
         with tab3:
             st.header("🏆 Панель директора холдингу")
             
-            if 'exec_rec' not in locals():
+            if 'exec_rec' not in st.session_state:
                 st.info("👈 Спочатку запустіть симуляцію у вкладці 'Симуляція'")
             else:
-                # Головний вердикт
+                exec_rec = st.session_state.exec_rec
+                summary = st.session_state.summary
+                revenue_change = st.session_state.revenue_change
+                profit_change = st.session_state.profit_change
+                
+                # Вердикт
                 st.markdown("## Вердикт")
                 if exec_rec['color'] == 'success':
                     st.success(f"### {exec_rec['verdict']}")
@@ -990,7 +958,7 @@ if df is not None:
                 
                 st.markdown("---")
                 
-                # Додаткова аналітика для директора
+                # Ключові показники
                 st.markdown("## 📈 Ключові показники")
                 
                 col1, col2, col3 = st.columns(3)
@@ -1006,10 +974,10 @@ if df is not None:
                 
                 with col3:
                     annual_impact = (summary['total']['new_profit'] - summary['total']['baseline_profit']) * 12
-                    st.metric("Річний вплив на прибуток", f"{annual_impact / 1_000_000:.1f}M₴")
+                    st.metric("Річний вплив", f"{annual_impact / 1_000_000:.1f}M₴")
         
         # ====================================================================
-        # ВКЛАДКА 4: КЛАСТЕРИ САЛОНІВ
+        # ВКЛАДКА 4: КЛАСТЕРИ
         # ====================================================================
         
         with tab4:
@@ -1018,16 +986,14 @@ if df is not None:
             st.markdown("""
             ### Як формуються кластери:
             
-            - **Кластер A (Преміум)**: Салони з високим середнім чеком (топ 33%)
-            - **Кластер B (Середній)**: Салони з середнім чеком (середні 33%)
-            - **Кластер C (Економ)**: Салони з низьким середнім чеком (нижні 33%)
-            
-            Кластеризація автоматична на основі реальних даних продажів.
+            - **Кластер A (Преміум)**: Високий середній чек (топ 33%)
+            - **Кластер B (Середній)**: Середній чек (середні 33%)
+            - **Кластер C (Економ)**: Низький середній чек (нижні 33%)
             """)
             
             st.markdown("---")
             
-            # Таблиця салонів з кластерами
+            # Таблиця кластерів
             clusters_display = analyzer.clusters[['cluster', 'revenue', 'profit', 'transactions', 
                                                    'avg_check', 'margin_pct', 'cluster_reason']].copy()
             
@@ -1037,11 +1003,10 @@ if df is not None:
             clusters_display['margin_pct'] = clusters_display['margin_pct'].apply(lambda x: f"{x:.1f}%")
             
             clusters_display.columns = ['Кластер', 'Виручка', 'Прибуток', 'Транзакції', 
-                                        'Середній чек', 'Маржа', 'Чому цей кластер?']
+                                        'Середній чек', 'Маржа', 'Чому?']
             
-            # Фільтр по кластеру
             cluster_filter = st.selectbox(
-                "Фільтр по кластеру:",
+                "Фільтр:",
                 options=['Всі'] + ['A', 'B', 'C']
             )
             
@@ -1050,7 +1015,6 @@ if df is not None:
             
             st.dataframe(clusters_display, use_container_width=True, height=600)
             
-            # Статистика по кластерах
             st.markdown("---")
             st.subheader("📊 Статистика по кластерах")
             
@@ -1074,68 +1038,29 @@ if df is not None:
                     st.metric("Виручка", f"{cluster_stats['revenue']/1_000_000:.1f}M₴")
                     st.metric("Середній чек", f"{cluster_stats['avg_check']:.0f}₴")
                     st.metric("Маржа", f"{cluster_stats['margin_pct']:.1f}%")
-            
-            # Інформація про модель
-            with st.expander("ℹ️ Про модель симуляції"):
-                st.markdown("""
-                **Математика моделі:**
-
-                1. **Еластичність попиту** (як попит реагує на ціну):
-                   ```
-                   Новий попит = Базовий попит × (1 + Δ% ціни × Еластичність)
-
-                   Еластичності:
-                   - Кластер A: -0.8 (при -10% ціни → +8% попиту)
-                   - Кластер B: -1.2 (при -10% ціни → +12% попиту)
-                   - Кластер C: -1.5 (при -10% ціни → +15% попиту)
-                   ```
-
-                2. **Зміна маржі**:
-                   ```
-                   При зниженні ціни на X%, маржа падає на X × 1.5%
-                   Приклад: ціна -10% → маржа -15%
-                   ```
-
-                3. **Переток клієнтів**:
-                   ```
-                   - При зниженні цін: +25% додаткового притоку в цільовий кластер
-                   - Відтік з кластеру B: -3% при зниженні цін в A
-                   ```
-
-                4. **Розрахунок виручки та прибутку**:
-                   ```
-                   Нова виручка = Базова виручка × Мультиплікатор попиту × Мультиплікатор ціни
-                   Новий прибуток = Нова виручка × Нова маржа
-                   ```
-
-                **Використані дані:**
-                - Реальні продажі з вашого Excel файлу
-                - Автоматичний розрахунок середніх чеків, маржі, ROI
-                - Кластеризація на основі квантилів
-                """)
-
+        
         # ====================================================================
         # ВКЛАДКА 5: ДАШБОРД ДИРЕКТОРА
         # ====================================================================
 
         with tab5:
             st.header("🎯 Дашборд директора холдингу")
-            st.markdown("### Система автоматичного виявлення подій, трендів та ризиків")
+            st.markdown("### Автоматичні події, тренди та ризики")
 
             dashboard_data = events_system.get_executive_dashboard_data()
 
-            # Швидка статистика
+            # Статистика
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("📢 Всього подій", dashboard_data['summary']['total_events'])
+                st.metric("📢 Подій", dashboard_data['summary']['total_events'])
             with col2:
-                st.metric("🔴 Критичні попередження", dashboard_data['summary']['critical_warnings'])
+                st.metric("🔴 Критичних", dashboard_data['summary']['critical_warnings'])
             with col3:
-                st.metric("📈 Позитивні тренди", dashboard_data['summary']['positive_trends'])
+                st.metric("📈 Позитивних", dashboard_data['summary']['positive_trends'])
 
             st.markdown("---")
 
-            # Секція попереджень
+            # Попередження
             if dashboard_data['warnings']:
                 st.subheader("⚠️ Попередження та ризики")
 
@@ -1143,21 +1068,18 @@ if df is not None:
                     if warning['level'] == 'critical':
                         with st.expander(f"🔴 {warning['title']}", expanded=True):
                             st.error(warning['description'])
-                            st.info(f"**📋 Рекомендована дія:** {warning['action']}")
-                            st.caption(f"Вплив: {warning['impact']}")
+                            st.info(f"**📋 Дія:** {warning['action']}")
                     else:
                         with st.expander(f"⚠️ {warning['title']}"):
                             st.warning(warning['description'])
-                            st.info(f"**📋 Рекомендована дія:** {warning['action']}")
-                            st.caption(f"Вплив: {warning['impact']}")
+                            st.info(f"**📋 Дія:** {warning['action']}")
 
                 st.markdown("---")
 
-            # Секція подій
+            # Події
             if dashboard_data['events']:
                 st.subheader("📢 Важливі події")
 
-                # Розділення на колонки
                 col1, col2 = st.columns(2)
 
                 for idx, event in enumerate(dashboard_data['events']):
@@ -1173,9 +1095,9 @@ if df is not None:
 
                 st.markdown("---")
 
-            # Секція трендів
+            # Тренди
             if dashboard_data['trends']:
-                st.subheader("📊 Виявлені тренди")
+                st.subheader("📊 Тренди")
 
                 for trend in dashboard_data['trends']:
                     col1, col2, col3, col4 = st.columns([2, 1, 1, 3])
@@ -1204,13 +1126,13 @@ if df is not None:
 
                 st.markdown("---")
 
-            # Додаткова аналітика
+            # Детальна аналітика
             st.subheader("📈 Детальна аналітика")
 
             col1, col2 = st.columns(2)
 
             with col1:
-                st.markdown("#### Топ-5 салонів (виручка)")
+                st.markdown("#### Топ-5 за виручкою")
                 top5 = analyzer.salons_stats.head(5)[['revenue', 'profit', 'margin_pct']]
                 top5_display = top5.copy()
                 top5_display['revenue'] = top5_display['revenue'].apply(lambda x: f"{x/1_000_000:.2f}M₴")
@@ -1220,7 +1142,7 @@ if df is not None:
                 st.dataframe(top5_display, use_container_width=True)
 
             with col2:
-                st.markdown("#### Топ-5 салонів (ROI)")
+                st.markdown("#### Топ-5 за ROI")
                 top5_roi = analyzer.salons_stats.nlargest(5, 'roi')[['revenue', 'profit', 'roi']]
                 top5_roi_display = top5_roi.copy()
                 top5_roi_display['revenue'] = top5_roi_display['revenue'].apply(lambda x: f"{x/1_000_000:.2f}M₴")
@@ -1231,10 +1153,9 @@ if df is not None:
 
             st.markdown("---")
 
-            # Загальні висновки
-            st.subheader("💡 Загальні висновки та рекомендації")
+            # Висновки
+            st.subheader("💡 Висновки")
 
-            # Автоматичні висновки на основі даних
             total_revenue = analyzer.df['revenue'].sum()
             total_profit = analyzer.df['profit'].sum()
             overall_margin = (total_profit / total_revenue * 100) if total_revenue > 0 else 0
@@ -1242,151 +1163,105 @@ if df is not None:
             conclusions = []
 
             if overall_margin > 40:
-                conclusions.append("✅ **Відмінна маржинальність:** Холдинг показує високу прибутковість (>40%). Зберігайте фокус на якості та преміум-сегменті.")
+                conclusions.append("✅ **Відмінна маржинальність** (>40%)")
             elif overall_margin > 25:
-                conclusions.append("👍 **Добра маржинальність:** Стійке становище (25-40%). Є можливості для оптимізації асортименту.")
+                conclusions.append("👍 **Добра маржинальність** (25-40%)")
             else:
-                conclusions.append("⚠️ **Низька маржинальність:** Маржа <25% вимагає негайних дій - перегляд цін, оптимізація витрат, робота з постачальниками.")
+                conclusions.append("⚠️ **Низька маржинальність** (<25%)")
 
-            # Аналіз кластерів
             cluster_dist = analyzer.clusters['cluster'].value_counts()
             if 'A' in cluster_dist.index:
-                premium_count = cluster_dist['A']
-                premium_pct = premium_count / len(analyzer.clusters) * 100
+                premium_pct = cluster_dist['A'] / len(analyzer.clusters) * 100
                 if premium_pct > 30:
-                    conclusions.append(f"💎 **Сильний преміум-сегмент:** {premium_pct:.0f}% салонів в кластері A. Це конкурентна перевага!")
+                    conclusions.append(f"💎 **Сильний преміум**: {premium_pct:.0f}% в кластері A")
                 else:
-                    conclusions.append(f"📊 **Потенціал преміумізації:** Лише {premium_pct:.0f}% салонів в топ-сегменті. Розгляньте стратегію апгрейду.")
+                    conclusions.append(f"📊 **Потенціал**: {premium_pct:.0f}% в топ-сегменті")
 
-            # Диверсифікація
             segment_stats = analyzer.get_segment_analysis()
             if segment_stats is not None and len(segment_stats) > 1:
                 top_segment_share = segment_stats['revenue_share'].max()
                 if top_segment_share > 60:
-                    conclusions.append(f"⚠️ **Висока концентрація:** {top_segment_share:.0f}% виручки з одного сегменту. Ризик при зміні ринку. Рекомендується диверсифікація.")
+                    conclusions.append(f"⚠️ **Висока концентрація**: {top_segment_share:.0f}% в одному сегменті")
                 else:
-                    conclusions.append("✅ **Збалансований портфель:** Добра диверсифікація по сегментах знижує ризики.")
+                    conclusions.append("✅ **Збалансований портфель**")
 
             for conclusion in conclusions:
                 st.markdown(conclusion)
 
             st.markdown("---")
 
-            # Експорт звіту
+            # Експорт
             st.subheader("📄 Експорт звіту")
 
             if st.button("📥 Згенерувати Executive Summary", use_container_width=True):
                 report = f"""
-# EXECUTIVE SUMMARY - Дашборд директора холдингу
+# EXECUTIVE SUMMARY
 
-Дата звіту: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+Дата: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
-## 📊 Ключові показники
+## Ключові показники
 
-- **Загальна виручка:** {total_revenue / 1_000_000:.2f}M₴
-- **Загальний прибуток:** {total_profit / 1_000_000:.2f}M₴
-- **Маржинальність:** {overall_margin:.1f}%
-- **Кількість салонів:** {analyzer.df['salon'].nunique()}
-- **Всього транзакцій:** {len(analyzer.df):,}
+- Виручка: {total_revenue / 1_000_000:.2f}M₴
+- Прибуток: {total_profit / 1_000_000:.2f}M₴
+- Маржинальність: {overall_margin:.1f}%
+- Салонів: {analyzer.df['salon'].nunique()}
 
-## ⚠️ Критичні попередження ({len([w for w in dashboard_data['warnings'] if w['level'] == 'critical'])})
+## Критичні попередження
 
-{chr(10).join([f"- {w['title']}: {w['description']}" for w in dashboard_data['warnings'] if w['level'] == 'critical'])}
+{chr(10).join([f"- {w['title']}: {w['description']}" for w in dashboard_data['warnings'] if w['level'] == 'critical']) or "Немає"}
 
-## 📈 Позитивні тренди
+## Позитивні тренди
 
-{chr(10).join([f"- {t['metric']}: {t['change']} - {t['description']}" for t in dashboard_data['trends'] if t['status'] == 'positive'])}
+{chr(10).join([f"- {t['metric']}: {t['change']} - {t['description']}" for t in dashboard_data['trends'] if t['status'] == 'positive']) or "Немає"}
 
-## 💡 Рекомендації
+## Рекомендації
 
 {chr(10).join([f"{i+1}. {c}" for i, c in enumerate(conclusions)])}
-
----
-Звіт згенеровано автоматично системою аналітики
                 """
 
                 st.download_button(
-                    label="💾 Завантажити звіт (MD)",
+                    label="💾 Завантажити (MD)",
                     data=report,
                     file_name=f"executive_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
                     mime="text/markdown"
                 )
 
-                st.success("✅ Звіт готовий до завантаження!")
+                st.success("✅ Готово!")
 
-                with st.expander("👀 Попередній перегляд звіту"):
+                with st.expander("👀 Перегляд"):
                     st.markdown(report)
     
     except Exception as e:
-        st.error(f"❌ Помилка при завантаженні файлу: {str(e)}")
-        st.info("Переконайтеся, що файл містить колонки: Magazin, Datasales, Price, Qty, Sum тощо.")
+        st.error(f"❌ Помилка аналізу: {str(e)}")
         
-        with st.expander("📋 Детальна інформація про помилку"):
+        with st.expander("📋 Детальна інформація"):
             st.code(str(e))
 
 else:
-    # Інструкція для користувача
+    # Інструкція
     if data_source == "Google Sheets":
-        st.info("👆 Дані з Google Sheets завантажуються автоматично або натисніть кнопку '🔄 Завантажити дані'")
+        st.info("👆 Натисніть '🔄 Завантажити дані' для початку")
     else:
-        st.info("👆 Виберіть Excel файл з історією продажів для початку аналізу")
+        st.info("👆 Виберіть Excel файл для початку")
 
     st.markdown("""
     ### 📋 Вимоги до даних:
 
-    **Дані повинні містити наступні колонки** (як у Google Sheets, так і в Excel):
+    **Обов'язкові колонки:**
     - **Magazin** - назва салону
     - **Datasales** - дата продажу
-    - **Art** - артикул товару
-    - **Describe** - опис товару
-    - **Model** - модель
-    - **Segment** - сегмент товару
-    - **Purchaiseprice** - ціна закупівлі
     - **Price** - ціна продажу
     - **Qty** - кількість
     - **Sum** - сума продажу
 
-    ### 📊 Джерела даних:
-
-    1. **Google Sheets (рекомендовано):**
-       - Автоматичне оновлення даних
-       - Співпраця в реальному часі
-       - Таблиця повинна мати публічний доступ
-       - URL за замовчуванням вже налаштований
-
-    2. **Локальний Excel файл:**
-       - Підтримка форматів .xlsx та .xls
-       - Завантаження з вашого комп'ютера
-       - Підходить для конфіденційних даних
+    **Додаткові колонки:**
+    - Art, Describe, Model, Segment, Purchaiseprice
 
     ### 🎯 Що ви отримаєте:
     
-    1. **Аналіз даних:**
-       - Статистика по салонах
-       - Розподіл по кластерах
-       - Аналіз сегментів товарів
-       - Часові тренди
-    
-    2. **Симуляція "Що якщо":**
-       - Зміна цін по кластерах
-       - Прогноз виручки і прибутку
-       - Деталізація по салонах
-       - Візуалізація результатів
-    
-    3. **Панель директора:**
-       - Рекомендації щодо впровадження
-       - Аналіз ризиків
-       - План дій
-       - ROI та термін окупності
-
-    4. **Кластери салонів:**
-       - Автоматичний розподіл на A/B/C
-       - Пояснення чому салон в певному кластері
-       - Статистика по кластерах
-
-    5. **Дашборд директора (НОВИНКА!):**
-       - Автоматичне виявлення подій та трендів
-       - Попередження про критичні ситуації
-       - Висновки та рекомендації
-       - Експорт Executive Summary
+    1. **Аналіз даних** - статистика, кластери, тренди
+    2. **Симуляція "Що якщо"** - прогноз змін цін
+    3. **Панель директора** - рекомендації та ROI
+    4. **Кластери салонів** - автоматичний розподіл
+    5. **Дашборд директора** - події та попередження
     """)
