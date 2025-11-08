@@ -74,7 +74,6 @@ def load_excel_file(uploaded_file):
 # ============================================================================
 # АНАЛІЗАТОР ДАНИХ
 # ============================================================================
-
 class SalesDataAnalyzer:
     """Клас для аналізу реальних даних продажів"""
     
@@ -101,6 +100,21 @@ class SalesDataAnalyzer:
         
         df = df.rename(columns=column_mapping)
         
+        # 🔧 КРИТИЧНО: Конвертація числових колонок
+        numeric_columns = ['price', 'quantity', 'revenue', 'cost_price']
+        for col in numeric_columns:
+            if col in df.columns:
+                # Обробка текстових значень
+                if df[col].dtype == 'object':
+                    df[col] = (df[col]
+                              .astype(str)
+                              .str.replace(',', '.')
+                              .str.replace(' ', '')
+                              .str.replace('₴', '')
+                              .str.strip())
+                # Конвертація в числа
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
         # Конвертація дати
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
@@ -114,7 +128,7 @@ class SalesDataAnalyzer:
         df = df[df['revenue'] > 0]
         
         # Розрахунок прибутку
-        if 'cost_price' in df.columns and 'price' in df.columns:
+        if 'cost_price' in df.columns and df['cost_price'].notna().any():
             df['profit'] = (df['price'] - df['cost_price']) * df['quantity']
             df['margin'] = ((df['price'] - df['cost_price']) / df['price'] * 100).clip(0, 100)
         else:
