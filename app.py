@@ -349,7 +349,8 @@ class ExecutiveEventsSystem:
 
 class RealDataSimulator:
     """✅ Симулятор з КОРЕКТНОЮ математикою"""
-    
+    # Включає методи: simulate_price_change, get_summary, get_executive_recommendations
+
     def __init__(self, analyzer):
         self.analyzer = analyzer
         self.baseline = analyzer.salons_stats
