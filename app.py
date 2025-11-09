@@ -563,15 +563,30 @@ class RealDataSimulator:
 
     def get_executive_recommendations(self, summary, price_change, cluster):
         """Рекомендації для директора"""
-        revenue_change = summary['total']['revenue_change_pct']
-        profit_change = summary['total']['profit_change_pct']
-        margin_change = summary['total']['margin_change_pp']
+        # ✅ ИСПРАВЛЕНО: Используем результат ПО ЦЕЛЕВОМУ КЛАСТЕРУ
+        # а не по всей компании (чтобы не размывать эффект)
+        if cluster in summary['by_cluster']:
+            target_stats = summary['by_cluster'][cluster]
+            target_revenue_change = ((target_stats['new_revenue'] / target_stats['baseline_revenue']) - 1.0) * 100.0 if target_stats['baseline_revenue'] > 0 else 0
+            target_profit_change = ((target_stats['new_profit'] / target_stats['baseline_profit']) - 1.0) * 100.0 if target_stats['baseline_profit'] > 0 else 0
+            target_margin_change = target_stats['new_margin_pct'] - target_stats['baseline_margin_pct']
+        else:
+            target_revenue_change = 0
+            target_profit_change = 0
+            target_margin_change = 0
 
-        # Вердикт
-        if profit_change > 5:
+        # Общий результат по компании (для справки)
+        total_profit_change = summary['total']['profit_change_pct']
+        total_revenue_change = summary['total']['revenue_change_pct']
+
+        # Размер целевого кластера
+        target_share = (target_stats['baseline_revenue'] / summary['total']['baseline_revenue'] * 100.0) if cluster in summary['by_cluster'] and summary['total']['baseline_revenue'] > 0 else 0
+
+        # Вердикт НА ОСНОВЕ ЦЕЛЕВОГО КЛАСТЕРА (снижен порог: 3% вместо 5%)
+        if target_profit_change > 3:
             verdict = f"✅ РЕКОМЕНДУЮ: Зміна ціни на {price_change:+.0f}% для кластера {cluster}"
             color = 'success'
-        elif profit_change > 0:
+        elif target_profit_change > 0:
             verdict = f"⚠️ ОБЕРЕЖНО: Зміна ціни на {price_change:+.0f}% для кластера {cluster} можлива, але ефект невеликий"
             color = 'warning'
         else:
@@ -580,15 +595,14 @@ class RealDataSimulator:
 
         # Рекомендації
         recommendations = []
-        if profit_change > 0:
-            recommendations.append(f"Очікуване збільшення прибутку: {profit_change:.1f}%")
-        else:
-            recommendations.append(f"Очікуване зменшення прибутку: {profit_change:.1f}%")
+        recommendations.append(f"📊 Кластер {cluster}: {target_share:.1f}% виручки компанії")
+        recommendations.append(f"📈 Зміна прибутку кластера {cluster}: {target_profit_change:+.1f}%")
+        recommendations.append(f"🏢 Зміна прибутку компанії: {total_profit_change:+.1f}%")
 
-        if margin_change > 0:
-            recommendations.append(f"Маржа покращиться на {margin_change:.1f} п.п.")
-        elif margin_change < 0:
-            recommendations.append(f"Маржа погіршиться на {abs(margin_change):.1f} п.п.")
+        if target_margin_change > 0:
+            recommendations.append(f"💰 Маржа кластера {cluster} покращиться на {target_margin_change:.1f} п.п.")
+        elif target_margin_change < 0:
+            recommendations.append(f"⚠️ Маржа кластера {cluster} погіршиться на {abs(target_margin_change):.1f} п.п.")
 
         # Вплив на кластери
         cluster_impact = []
@@ -602,9 +616,11 @@ class RealDataSimulator:
             risks.append(f"Підвищення цін у кластері {cluster} може призвести до відтоку клієнтів")
         if abs(price_change) > 15:
             risks.append(f"Велика зміна ціни ({abs(price_change):.0f}%) може викликати негативну реакцію")
+        if target_share < 15:
+            risks.append(f"⚠️ Кластер {cluster} становить лише {target_share:.1f}% компанії - вплив на загальний результат обмежений")
 
-        # План дій
-        if profit_change > 0:
+        # План дій (використовуємо результат цільового кластера)
+        if target_profit_change > 0:
             action = f"Рекомендується поетапне впровадження зміни ціни на {price_change:+.0f}% протягом 1-2 місяців з моніторингом результатів"
         else:
             action = "Рекомендується утриматись від зміни цін або розглянути альтернативні сценарії"
