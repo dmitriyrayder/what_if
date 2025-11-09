@@ -482,7 +482,103 @@ class RealDataSimulator:
         """✅ НОВИЙ ГРАФІК: Розподіл цін"""
         return self.baseline['avg_check'].values
 
-    # get_summary та get_executive_recommendations без змін
+    def get_summary(self, simulation_df):
+        """Зведення з новими метриками"""
+        summary = {
+            'total': {
+                'baseline_revenue': simulation_df['baseline_revenue'].sum(),
+                'new_revenue': simulation_df['new_revenue'].sum(),
+                'baseline_profit': simulation_df['baseline_profit'].sum(),
+                'new_profit': simulation_df['new_profit'].sum(),
+                'baseline_margin': simulation_df['baseline_margin_pct'].mean(),
+                'new_margin': simulation_df['new_margin_pct'].mean()
+            },
+            'by_cluster': simulation_df.groupby('cluster').agg({
+                'baseline_revenue': 'sum',
+                'new_revenue': 'sum',
+                'baseline_profit': 'sum',
+                'new_profit': 'sum',
+                'baseline_margin_pct': 'mean',
+                'new_margin_pct': 'mean'
+            }).to_dict('index')
+        }
+
+        # Процентні зміни
+        if summary['total']['baseline_revenue'] > 0:
+            summary['total']['revenue_change_pct'] = (
+                (summary['total']['new_revenue'] / summary['total']['baseline_revenue'] - 1.0) * 100.0
+            )
+        else:
+            summary['total']['revenue_change_pct'] = 0
+
+        if summary['total']['baseline_profit'] > 0:
+            summary['total']['profit_change_pct'] = (
+                (summary['total']['new_profit'] / summary['total']['baseline_profit'] - 1.0) * 100.0
+            )
+        else:
+            summary['total']['profit_change_pct'] = 0
+
+        # Зміна маржі в процентних пунктах
+        summary['total']['margin_change_pp'] = summary['total']['new_margin'] - summary['total']['baseline_margin']
+
+        return summary
+
+    def get_executive_recommendations(self, summary, price_change, cluster):
+        """Рекомендації для директора"""
+        revenue_change = summary['total']['revenue_change_pct']
+        profit_change = summary['total']['profit_change_pct']
+        margin_change = summary['total']['margin_change_pp']
+
+        # Вердикт
+        if profit_change > 5:
+            verdict = f"✅ РЕКОМЕНДУЮ: Зміна ціни на {price_change:+.0f}% для кластера {cluster}"
+            color = 'success'
+        elif profit_change > 0:
+            verdict = f"⚠️ ОБЕРЕЖНО: Зміна ціни на {price_change:+.0f}% для кластера {cluster} можлива, але ефект невеликий"
+            color = 'warning'
+        else:
+            verdict = f"❌ НЕ РЕКОМЕНДУЮ: Зміна ціни на {price_change:+.0f}% для кластера {cluster}"
+            color = 'error'
+
+        # Рекомендації
+        recommendations = []
+        if profit_change > 0:
+            recommendations.append(f"Очікуване збільшення прибутку: {profit_change:.1f}%")
+        else:
+            recommendations.append(f"Очікуване зменшення прибутку: {profit_change:.1f}%")
+
+        if margin_change > 0:
+            recommendations.append(f"Маржа покращиться на {margin_change:.1f} п.п.")
+        elif margin_change < 0:
+            recommendations.append(f"Маржа погіршиться на {abs(margin_change):.1f} п.п.")
+
+        # Вплив на кластери
+        cluster_impact = []
+        for clust, stats in summary['by_cluster'].items():
+            rev_change = ((stats['new_revenue'] / stats['baseline_revenue']) - 1.0) * 100.0 if stats['baseline_revenue'] > 0 else 0
+            cluster_impact.append(f"Кластер {clust}: Виручка {rev_change:+.1f}%")
+
+        # Ризики
+        risks = []
+        if price_change > 0 and cluster in ['B', 'C']:
+            risks.append(f"Підвищення цін у кластері {cluster} може призвести до відтоку клієнтів")
+        if abs(price_change) > 15:
+            risks.append(f"Велика зміна ціни ({abs(price_change):.0f}%) може викликати негативну реакцію")
+
+        # План дій
+        if profit_change > 0:
+            action = f"Рекомендується поетапне впровадження зміни ціни на {price_change:+.0f}% протягом 1-2 місяців з моніторингом результатів"
+        else:
+            action = "Рекомендується утриматись від зміни цін або розглянути альтернативні сценарії"
+
+        return {
+            'verdict': verdict,
+            'color': color,
+            'recommendations': recommendations,
+            'cluster_impact': cluster_impact,
+            'risks': risks,
+            'action': action
+        }
 
 # ============================================================================
 # ІНТЕРФЕЙС STREAMLIT
