@@ -349,7 +349,8 @@ class ExecutiveEventsSystem:
 
 class RealDataSimulator:
     """✅ Симулятор з КОРЕКТНОЮ математикою"""
-    
+    # Включає методи: simulate_price_change, get_summary, get_executive_recommendations
+
     def __init__(self, analyzer):
         self.analyzer = analyzer
         self.baseline = analyzer.salons_stats
@@ -366,10 +367,10 @@ class RealDataSimulator:
         
         # Еластичність (перевірено)
         elasticity = {'A': -0.8, 'B': -1.2, 'C': -1.5}
-        
-        # Spillover (відкалібровано)
-        spillover_to_target = 0.20  # Було 0.25
-        spillover_from_others = 0.05  # Було 0.03
+
+        # Spillover (відкалібровано) - ЗМЕНШЕНО для реалістичності
+        spillover_to_target = 0.05  # Було 0.20 (занадто багато!)
+        spillover_from_others = 0.03  # Було 0.05
         
         for salon, baseline_stats in self.baseline.iterrows():
             cluster = self.analyzer.clusters.loc[salon, 'cluster']
@@ -387,14 +388,24 @@ class RealDataSimulator:
             
             if cluster == target_cluster:
                 # ===== ЦІЛЬОВИЙ КЛАСТЕР =====
-                
+
                 # 1. Попит через еластичність
                 demand_multiplier = 1.0 + (price_change_pct / 100.0) * elasticity[cluster]
-                
-                # 2. Spillover при зниженні
+
+                # 2. Spillover ефекти
                 if price_change_pct < 0:
+                    # При ЗНИЖЕННІ цін: приплив клієнтів з інших кластерів
                     demand_multiplier += spillover_to_target
-                
+                else:
+                    # При ПІДВИЩЕННІ цін: відтік клієнтів (залежить від кластера)
+                    # Премиум (A) втрачає менше, економ (C) втрачає більше
+                    if cluster == 'A':
+                        demand_multiplier -= spillover_to_target * 0.3  # Малий відтік
+                    elif cluster == 'B':
+                        demand_multiplier -= spillover_to_target * 0.5  # Середній відтік
+                    else:  # C
+                        demand_multiplier -= spillover_to_target * 0.8  # Великий відтік
+
                 # 3. Нова кількість
                 new_quantity = baseline_quantity * demand_multiplier
                 
@@ -415,10 +426,23 @@ class RealDataSimulator:
             else:
                 # ===== ІНШІ КЛАСТЕРИ =====
                 if price_change_pct < 0:
+                    # Цільовий кластер ЗНИЖУЄ ціни → інші втрачають клієнтів
                     loss_factor = spillover_from_others if cluster == 'B' else spillover_from_others * 0.5
                 else:
-                    loss_factor = -spillover_from_others * 0.3
-                
+                    # Цільовий кластер ПІДВИЩУЄ ціни → інші отримують клієнтів
+                    # Виграш залежить від різниці кластерів
+                    if target_cluster == 'A' and cluster == 'B':
+                        # Премиум підвищує → середній виграє більше
+                        gain_factor = spillover_from_others * 0.6
+                    elif target_cluster == 'A' and cluster == 'C':
+                        # Премиум підвищує → економ виграє менше
+                        gain_factor = spillover_from_others * 0.3
+                    else:
+                        # Інші випадки
+                        gain_factor = spillover_from_others * 0.4
+
+                    loss_factor = -gain_factor  # Негативний = виграш
+
                 new_revenue = baseline_revenue * (1.0 - loss_factor)
                 new_profit = baseline_profit * (1.0 - loss_factor)
                 new_margin_pct = baseline_margin_pct
@@ -448,34 +472,48 @@ class RealDataSimulator:
     def get_elasticity_curves(self, target_cluster):
         """✅ НОВИЙ ГРАФІК: Криві еластичності"""
         elasticity = {'A': -0.8, 'B': -1.2, 'C': -1.5}
+        spillover_to_target = 0.05
         price_changes = np.arange(-30, 31, 1)
         curves = {}
-        
+
         for cluster, elast in elasticity.items():
             demand_changes = []
             revenue_changes = []
-            
+
             for price_pct in price_changes:
                 # Попит
                 demand_mult = 1.0 + (price_pct / 100.0) * elast
-                if price_pct < 0 and cluster == target_cluster:
-                    demand_mult += 0.20
+
+                # Spillover ефекти (тільки для цільового кластера)
+                if cluster == target_cluster:
+                    if price_pct < 0:
+                        # Зниження: приплив клієнтів
+                        demand_mult += spillover_to_target
+                    else:
+                        # Підвищення: відтік клієнтів
+                        if cluster == 'A':
+                            demand_mult -= spillover_to_target * 0.3
+                        elif cluster == 'B':
+                            demand_mult -= spillover_to_target * 0.5
+                        else:  # C
+                            demand_mult -= spillover_to_target * 0.8
+
                 demand_change_pct = (demand_mult - 1.0) * 100.0
-                
+
                 # Виручка
                 price_mult = 1.0 + price_pct / 100.0
                 revenue_mult = demand_mult * price_mult
                 revenue_change_pct = (revenue_mult - 1.0) * 100.0
-                
+
                 demand_changes.append(demand_change_pct)
                 revenue_changes.append(revenue_change_pct)
-            
+
             curves[cluster] = {
                 'price_changes': price_changes,
                 'demand_changes': demand_changes,
                 'revenue_changes': revenue_changes
             }
-        
+
         return curves
     
     def get_price_distribution(self):
