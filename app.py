@@ -1381,6 +1381,234 @@ if df is not None:
                         st.caption(trend['description'])
 
                 st.markdown("---")
+                # ====================================================================
+# ВКЛАДКА 6: ЕЛАСТИЧНІСТЬ
+# ====================================================================
+
+with tab6:
+    st.header("📈 Аналіз еластичності та розподілу цін")
+    
+    st.markdown("""
+    ### Що показують графіки:
+    - **Еластичність попиту**: як зміна ціни впливає на обсяг продажів
+    - **Еластичність виручки**: чистий ефект на виручку
+    - **Розподіл цін**: як розподілені ціни по салонах
+    """)
+    
+    # Вибір кластеру
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        analysis_cluster = st.selectbox(
+            "🎯 Кластер для аналізу",
+            options=['A', 'B', 'C'],
+            key='elasticity_cluster'
+        )
+    
+    with col2:
+        elasticity_values = {'A': -0.8, 'B': -1.2, 'C': -1.5}
+        st.info(f"""
+        **Еластичність кластеру {analysis_cluster}:** {elasticity_values[analysis_cluster]}
+        
+        - A: -0.8 (нееластичний - преміум)
+        - B: -1.2 (еластичний - середній)
+        - C: -1.5 (дуже еластичний - економ)
+        """)
+    
+    st.markdown("---")
+    
+    # ===== ГРАФІК 1: Криві еластичності =====
+    st.subheader("📊 Криві еластичності по кластерах")
+    
+    curves = simulator.get_elasticity_curves(analysis_cluster)
+    
+    fig = go.Figure()
+    
+    colors = {'A': 'gold', 'B': 'silver', 'C': 'brown'}
+    
+    for cluster, data in curves.items():
+        # Виручка (суцільна лінія)
+        fig.add_trace(go.Scatter(
+            x=data['price_changes'],
+            y=data['revenue_changes'],
+            name=f"Кластер {cluster}: Виручка",
+            line=dict(color=colors[cluster], width=3 if cluster == analysis_cluster else 2),
+            hovertemplate='Ціна: %{x}%<br>Виручка: %{y:.1f}%<extra></extra>'
+        ))
+        
+        # Попит (пунктир)
+        fig.add_trace(go.Scatter(
+            x=data['price_changes'],
+            y=data['demand_changes'],
+            name=f"Кластер {cluster}: Попит",
+            line=dict(color=colors[cluster], width=3 if cluster == analysis_cluster else 2, dash='dash'),
+            hovertemplate='Ціна: %{x}%<br>Попит: %{y:.1f}%<extra></extra>'
+        ))
+    
+    # Осі координат
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+    fig.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
+    
+    # Зони (зелена = знижки, червона = підвищення)
+    fig.add_vrect(x0=-30, x1=0, fillcolor="green", opacity=0.05, line_width=0)
+    fig.add_vrect(x0=0, x1=30, fillcolor="red", opacity=0.05, line_width=0)
+    
+    fig.update_layout(
+        title="Еластичність попиту та виручки по кластерах",
+        xaxis_title="Зміна ціни (%)",
+        yaxis_title="Зміна (%)",
+        height=500,
+        hovermode='x unified',
+        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Пояснення
+    with st.expander("ℹ️ Як читати графік"):
+        st.markdown("""
+        **Суцільні лінії** - зміна виручки (ціна × попит)  
+        **Пунктир** - зміна попиту (тільки обсяг)
+        
+        **Інтерпретація:**
+        - Лінія виручки вище 0 → зміна ціни вигідна
+        - Лінія виручки нижче 0 → зміна ціни невигідна
+        - Чим крутіше пунктир → більша еластичність
+        
+        **Приклад для кластеру C (економ):**
+        - Зниження на 10% → попит +15% → виручка росте
+        - Підвищення на 10% → попит -15% → виручка падає
+        """)
+    
+    st.markdown("---")
+    
+    # ===== ГРАФІК 2: Розподіл цін =====
+    st.subheader("💰 Розподіл середнього чека по салонах")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Histogram загальний
+        price_dist = simulator.get_price_distribution()
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Histogram(
+            x=price_dist,
+            nbinsx=30,
+            name='Розподіл цін',
+            marker_color='blue',
+            opacity=0.7
+        ))
+        
+        # Медіана
+        median_price = np.median(price_dist)
+        fig.add_vline(
+            x=median_price, 
+            line_dash="dash", 
+            line_color="red",
+            annotation_text=f"Медіана: {median_price:.0f}₴",
+            annotation_position="top"
+        )
+        
+        fig.update_layout(
+            title="Розподіл середнього чека (всі салони)",
+            xaxis_title="Середній чек (₴)",
+            yaxis_title="Кількість салонів",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Box plot по кластерах
+        cluster_prices = []
+        cluster_labels = []
+        
+        for cluster in ['A', 'B', 'C']:
+            cluster_salons = analyzer.clusters[analyzer.clusters['cluster'] == cluster]
+            prices = cluster_salons['avg_check'].values
+            cluster_prices.extend(prices)
+            cluster_labels.extend([cluster] * len(prices))
+        
+        df_prices = pd.DataFrame({
+            'Середній чек': cluster_prices,
+            'Кластер': cluster_labels
+        })
+        
+        fig = px.box(
+            df_prices,
+            x='Кластер',
+            y='Середній чек',
+            color='Кластер',
+            color_discrete_map={'A': 'gold', 'B': 'silver', 'C': 'brown'},
+            title="Розподіл цін по кластерах"
+        )
+        
+        fig.update_layout(height=400, showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ===== СТАТИСТИКА =====
+    st.subheader("📊 Статистика по кластерах")
+    
+    stats_table = []
+    
+    for cluster in ['A', 'B', 'C']:
+        cluster_salons = analyzer.clusters[analyzer.clusters['cluster'] == cluster]
+        prices = cluster_salons['avg_check'].values
+        
+        stats_table.append({
+            'Кластер': cluster,
+            'Кількість': len(prices),
+            'Медіана': f"{np.median(prices):.0f}₴",
+            'Середнє': f"{np.mean(prices):.0f}₴",
+            'Min': f"{np.min(prices):.0f}₴",
+            'Max': f"{np.max(prices):.0f}₴",
+            'Std Dev': f"{np.std(prices):.0f}₴"
+        })
+    
+    df_stats = pd.DataFrame(stats_table)
+    st.dataframe(df_stats, use_container_width=True)
+    
+    # ===== ВИСНОВКИ =====
+    st.markdown("---")
+    st.subheader("🔍 Автоматичні висновки")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("#### По еластичності:")
+        
+        if analysis_cluster == 'A':
+            st.success("✅ Кластер A - можна підвищувати ціни")
+            st.info("Клієнти преміум-сегменту менш чутливі до змін цін")
+        elif analysis_cluster == 'B':
+            st.warning("⚠️ Кластер B - обережно з цінами")
+            st.info("Середній сегмент збалансований - тестуйте поступово")
+        else:
+            st.error("❌ Кластер C - тільки акції та знижки")
+            st.info("Економ-сегмент дуже чутливий - фокус на обсяг")
+    
+    with col2:
+        st.markdown("#### По розподілу:")
+        
+        price_range = np.max(price_dist) - np.min(price_dist)
+        cv = np.std(price_dist) / np.mean(price_dist)  # Коефіцієнт варіації
+        
+        if cv < 0.2:
+            st.success("✅ Ціни однорідні")
+            st.info("Можна застосовувати єдину цінову стратегію")
+        elif cv < 0.4:
+            st.warning("⚠️ Ціни помірно різняться")
+            st.info("Рекомендується сегментний підхід")
+        else:
+            st.error("❌ Ціни дуже різняться")
+            st.info("Потрібен індивідуальний підхід до кожного салону")
+        
+        st.metric("Коефіцієнт варіації", f"{cv*100:.1f}%")
+        st.metric("Діапазон цін", f"{price_range:.0f}₴")
 
             # Детальна аналітика
             st.subheader("📈 Детальна аналітика")
